@@ -1,5 +1,6 @@
 package cc.sche.apps.nexttask
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -7,6 +8,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.Surface
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.RadioButton
 import androidx.compose.ui.semantics.Role
@@ -45,6 +48,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -53,6 +57,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -88,7 +93,6 @@ private fun App(viewModel: AppViewModel = viewModel()) {
     val completedOrder by viewModel.completedOrder.collectAsState()
     var showPreferences by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showPreferences) { showPreferences = false }
-    val context = LocalContext.current
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         error?.let {
@@ -99,14 +103,15 @@ private fun App(viewModel: AppViewModel = viewModel()) {
         }
         when (val current = state) {
             AppState.Loading -> Centered { CircularProgressIndicator() }
-            AppState.LoggedOut -> LoginScreen { server ->
-                viewModel.signIn(server) { url -> context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-            }
-            is AppState.WaitingForBrowser -> Centered {
-                Text("Approve the login in your browser, then come back here.")
-                CircularProgressIndicator()
-                TextButton(onClick = viewModel::cancelSignIn) { Text("Cancel") }
-            }
+            AppState.LoggedOut -> LoginScreen(onSignIn = viewModel::signIn)
+            is AppState.ConfirmHttps -> AlertDialog(
+                onDismissRequest = viewModel::cancelSignIn,
+                title = { Text("Server redirects to HTTPS") },
+                text = { Text("The server redirects to an encrypted connection. Sign in at ${current.httpsServerUrl} instead?") },
+                confirmButton = { TextButton(onClick = { viewModel.signIn(current.httpsServerUrl) }) { Text("OK") } },
+                dismissButton = { TextButton(onClick = viewModel::cancelSignIn) { Text("Cancel") } },
+            )
+            is AppState.WaitingForBrowser -> WaitingForBrowserScreen(current.loginUrl, onCancel = viewModel::cancelSignIn)
             AppState.LoadFailed -> Centered {
                 Text("Could not load your tasks.")
                 Button(onClick = viewModel::refresh) { Text("Retry") }
@@ -126,6 +131,7 @@ private fun App(viewModel: AppViewModel = viewModel()) {
                 onSetCompleted = viewModel::setCompleted,
                 onRefresh = viewModel::refresh,
                 onSignOut = viewModel::signOut,
+                onSignInAgain = viewModel::signInAgain,
             )
         }
     }
@@ -199,6 +205,32 @@ private fun LoginScreen(onSignIn: (String) -> Unit) {
             )
         }
         Button(onClick = { signIn() }, enabled = address.isNotEmpty()) { Text("Sign in with browser") }
+    }
+}
+
+@Composable
+private fun WaitingForBrowserScreen(loginUrl: String, onCancel: () -> Unit) {
+    val context = LocalContext.current
+    // Saved across rotation, so the browser opens once per login rather than once per configuration.
+    var openedUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var noBrowser by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(loginUrl) {
+        if (openedUrl == loginUrl) return@LaunchedEffect
+        openedUrl = loginUrl
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(loginUrl)))
+        } catch (_: ActivityNotFoundException) {
+            noBrowser = true
+        }
+    }
+    Centered {
+        if (noBrowser) {
+            Text("No browser found. Open this address on this device to approve the login:\n$loginUrl")
+        } else {
+            Text("Approve the login in your browser, then come back here.")
+        }
+        CircularProgressIndicator()
+        TextButton(onClick = onCancel) { Text("Cancel") }
     }
 }
 
@@ -279,6 +311,7 @@ private fun TaskTreeScreen(
     onSetCompleted: (uid: String, completed: Boolean) -> Unit,
     onRefresh: () -> Unit,
     onSignOut: () -> Unit,
+    onSignInAgain: () -> Unit,
 ) {
     var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var completedSectionOpen by rememberSaveable { mutableStateOf(true) }
@@ -296,7 +329,9 @@ private fun TaskTreeScreen(
                     Icon(Icons.Default.Menu, contentDescription = "Menu")
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text("Refresh") }, onClick = { menuOpen = false; onRefresh() })
+                    if (!tasks.accessRevoked) {
+                        DropdownMenuItem(text = { Text("Refresh") }, onClick = { menuOpen = false; onRefresh() })
+                    }
                     DropdownMenuItem(text = { Text("Preferences") }, onClick = { menuOpen = false; onOpenPreferences() })
                     DropdownMenuItem(text = { Text("Sign out") }, onClick = { menuOpen = false; onSignOut() })
                 }
@@ -309,6 +344,7 @@ private fun TaskTreeScreen(
                 Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo")
             }
         }
+        if (tasks.accessRevoked) SignedOutBanner(onSignInAgain)
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = onRefresh,
@@ -320,7 +356,7 @@ private fun TaskTreeScreen(
                 Modifier.fillMaxSize().graphicsLayer { translationY = pullState.distanceFraction * pullThresholdPx },
             ) {
                 if (activeRows.isEmpty() && tasks.completed.isEmpty()) item { Text("No tasks.") }
-                items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, onSetCompleted, toggleCollapsed) }
+                items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed) }
                 if (tasks.completed.isNotEmpty()) {
                     item(key = "completed-header") {
                         val count = tasks.completed.size
@@ -341,7 +377,7 @@ private fun TaskTreeScreen(
                         }
                     }
                     if (completedSectionOpen) {
-                        items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, onSetCompleted, toggleCollapsed) }
+                        items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed) }
                     }
                 }
             }
@@ -350,9 +386,30 @@ private fun TaskTreeScreen(
 }
 
 @Composable
+private fun SignedOutBanner(onSignInAgain: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+    ) {
+        Column(Modifier.padding(start = 16.dp, top = 12.dp, end = 8.dp)) {
+            Text("Signed out", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "The server no longer accepts this device's login. Your tasks stay here, read-only, " +
+                    "until you sign in again. Long-press a task to copy its text.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            TextButton(onClick = onSignInAgain, modifier = Modifier.align(Alignment.End)) { Text("Sign in again") }
+        }
+    }
+}
+
+@Composable
 private fun TaskRow(
     row: VisibleRow,
     collapsed: Set<String>,
+    readOnly: Boolean,
     onSetCompleted: (uid: String, completed: Boolean) -> Unit,
     onToggleCollapsed: (uid: String) -> Unit,
 ) {
@@ -370,13 +427,17 @@ private fun TaskRow(
         ) {
             if (hasChildren) FoldIcon(expanded = row.node.uid !in collapsed)
         }
-        Checkbox(checked = task.isCompleted, onCheckedChange = { onSetCompleted(task.uid, it) })
+        Checkbox(checked = task.isCompleted, onCheckedChange = { onSetCompleted(task.uid, it) }, enabled = !readOnly)
         Column(Modifier.weight(1f)) {
-            Text(
-                task.summary,
-                textDecoration = if (task.isCompleted) TextDecoration.LineThrough else null,
-                color = if (task.isCompleted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-            )
+            val summary = @Composable {
+                Text(
+                    task.summary,
+                    textDecoration = if (task.isCompleted) TextDecoration.LineThrough else null,
+                    color = if (task.isCompleted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            // Read-only after a revoked login: let the user copy what they still need.
+            if (readOnly) SelectionContainer { summary() } else summary()
             task.completed?.let(ICalDateTime::dateOf)?.let {
                 Text("Completed $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }

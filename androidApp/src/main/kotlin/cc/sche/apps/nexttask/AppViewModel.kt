@@ -5,7 +5,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import cc.sche.apps.nexttask.auth.Credentials
 import cc.sche.apps.nexttask.auth.LoginFlowV2
+import cc.sche.apps.nexttask.auth.RedirectsToHttpsException
 import cc.sche.apps.nexttask.auth.normalizeServerUrl
+import cc.sche.apps.nexttask.auth.revokeAppPassword
 import cc.sche.apps.nexttask.caldav.CalDavClient
 import cc.sche.apps.nexttask.caldav.RemoteTask
 import cc.sche.apps.nexttask.caldav.UnauthorizedException
@@ -23,9 +25,12 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpRequestRetry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -38,13 +43,19 @@ sealed interface AppState {
     data object Loading : AppState
     /** Signed in, but the task list could not be fetched (offline, server down). */
     data object LoadFailed : AppState
+    /** The plain HTTP address the user entered redirects to HTTPS; ask before signing in there instead. */
+    data class ConfirmHttps(val httpsServerUrl: String) : AppState
     /** The user has been sent to the browser and we are waiting for them to approve. */
     data class WaitingForBrowser(val loginUrl: String) : AppState
-    /** [active] are the open top-level tasks; [completed] the done top-level tasks, last completed on top. */
+    /**
+     * [active] are the open top-level tasks; [completed] the done top-level tasks, last completed on top.
+     * With [accessRevoked] the server no longer accepts the login: the list is the last known state, read-only.
+     */
     data class Tasks(
         val calendarName: String,
         val active: List<TaskNode>,
         val completed: List<TaskNode>,
+        val accessRevoked: Boolean = false,
     ) : AppState
 }
 
@@ -52,6 +63,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val store = CredentialStore(application)
     private val http = HttpClient(OkHttp) {
+        // Every request URL is built from the account's server address. A redirect could only move
+        // requests (and the credentials sent with them) somewhere the user did not choose.
+        followRedirects = false
         // The app is often resumed before the network is usable again; a failed lookup means the
         // request was never sent, so retrying is safe for every method.
         install(HttpRequestRetry) {
@@ -82,20 +96,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private var job: Job? = null
 
+    /** Parent of all work for the signed-in account, so signing out stops it in one go. */
+    private val accountWork = SupervisorJob(viewModelScope.coroutineContext.job)
+
     /** Serialises server round trips so ETags are never stale between consecutive writes. */
     private val serverLock = Mutex()
 
+    private var credentials: Credentials? = null
     private var client: CalDavClient? = null
     private var calendarName = ""
     private var calendarHref = ""
     private var items: Map<String, RemoteTask> = emptyMap()
+    private var accessRevoked = false
 
     init {
         val saved = store.load()
+        credentials = saved
         if (saved == null) _state.value = AppState.LoggedOut else load(saved)
     }
 
-    fun signIn(serverInput: String, openBrowser: (String) -> Unit) {
+    /** Starts the browser login; the UI opens [AppState.WaitingForBrowser.loginUrl]. */
+    fun signIn(serverInput: String) {
         val serverUrl = normalizeServerUrl(serverInput)
         if (serverUrl == null) {
             _error.value = "Enter a valid server address"
@@ -104,15 +125,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         launchGuarded(fallback = AppState.LoggedOut) {
             _state.value = AppState.Loading
             val flow = LoginFlowV2(http, userAgent = "NextTask Android")
-            val session = flow.start(serverUrl)
+            val session = try {
+                flow.start(serverUrl)
+            } catch (e: RedirectsToHttpsException) {
+                _state.value = AppState.ConfirmHttps(e.httpsServerUrl)
+                return@launchGuarded
+            }
             _state.value = AppState.WaitingForBrowser(session.loginUrl)
-            openBrowser(session.loginUrl)
-            val credentials = flow.awaitCredentials(session)
-            store.save(credentials)
+            val approved = flow.awaitCredentials(session)
+            store.save(approved)
+            credentials = approved
             _state.value = AppState.Loading
             // The login itself succeeded: a failure from here on must not send the user back to sign-in.
             try {
-                fetchTasks(credentials)
+                serverLock.withLock { fetchTasks(approved) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: UnauthorizedException) {
@@ -130,18 +156,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refresh() {
-        val credentials = store.load() ?: return
+        val credentials = credentials ?: return
         val current = _state.value
         if (current is AppState.Tasks) refreshInPlace(credentials, current) else load(credentials)
     }
 
     fun signOut() {
-        job?.cancel()
-        store.clear()
-        client = null
-        items = emptyMap()
-        history.clear()
-        _state.value = AppState.LoggedOut
+        val signedOut = credentials
+        forgetAccount()
+        if (signedOut == null) return
+        // Best effort: if this fails the app password stays valid on the server, so tell the user.
+        viewModelScope.launch {
+            try {
+                revokeAppPassword(http, signedOut)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _error.value = "Signed out, but the app password could not be revoked. " +
+                    "Remove it in Nextcloud under Settings → Security."
+            }
+        }
+    }
+
+    /** Leaves the read-only list shown after a revoked login for the sign-in screen. */
+    fun signInAgain() {
+        forgetAccount()
     }
 
     fun setCompletedOrder(order: CompletedOrder) {
@@ -156,6 +195,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Ticks or unticks a task. The list updates immediately; the server is written in the background. */
     fun setCompleted(uid: String, completed: Boolean) {
+        if (accessRevoked) return
         val now = ICalDateTime.nowUtc()
         val tasks = items.values.map { it.task }
         val changed = if (completed) TaskCompletion.complete(tasks, uid, now) else TaskCompletion.reopen(tasks, uid, now)
@@ -166,11 +206,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun undo() {
+        if (accessRevoked) return
         val edit = history.undo() ?: return
         commit(edit.before.map { it.withLastModified(ICalDateTime.nowUtc()) })
     }
 
     fun redo() {
+        if (accessRevoked) return
         val edit = history.redo() ?: return
         commit(edit.after.map { it.withLastModified(ICalDateTime.nowUtc()) })
     }
@@ -183,7 +225,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         publish()
         if (changed.isEmpty()) return
 
-        viewModelScope.launch {
+        viewModelScope.launch(accountWork) {
             serverLock.withLock {
                 try {
                     val client = client ?: return@withLock
@@ -194,14 +236,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         items = items + (task.uid to current.copy(etag = result.etag.orEmpty()))
                         if (result.etag == null) needsRefetch = true
                     }
-                    if (needsRefetch) store.load()?.let { fetchTasks(it) }
+                    if (needsRefetch) credentials?.let { fetchTasks(it) }
                 } catch (e: CancellationException) {
                     throw e
+                } catch (_: UnauthorizedException) {
+                    onAccessRevoked()
                 } catch (e: Exception) {
                     report(e)
                     // Show what the server really has instead of an optimistic state that failed to save.
                     try {
-                        store.load()?.let { fetchTasks(it) }
+                        credentials?.let { fetchTasks(it) }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (_: Exception) {
@@ -215,7 +259,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun load(credentials: Credentials) {
         launchGuarded(fallback = AppState.LoadFailed) {
             _state.value = AppState.Loading
-            fetchTasks(credentials)
+            serverLock.withLock { fetchTasks(credentials) }
         }
     }
 
@@ -224,7 +268,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         launchGuarded(fallback = current) {
             _refreshing.value = true
             try {
-                fetchTasks(credentials)
+                serverLock.withLock { fetchTasks(credentials) }
             } finally {
                 _refreshing.value = false
             }
@@ -245,25 +289,59 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun publish() {
-        _historyState.value = HistoryState(history.canUndo, history.canRedo)
+        _historyState.value = HistoryState(history.canUndo && !accessRevoked, history.canRedo && !accessRevoked)
         val (completed, active) = TaskTree.build(items.values.map { it.task }, _completedOrder.value).partition { it.task.isCompleted }
-        _state.value = AppState.Tasks(calendarName, active, completed)
+        _state.value = AppState.Tasks(calendarName, active, completed, accessRevoked)
     }
 
-    /** Runs [block], turning failures into a visible error. A revoked login sends the user back to sign-in. */
+    /**
+     * Runs [block], turning failures into a visible error, or [onAccessRevoked] for a revoked login.
+     * [block] takes [serverLock] itself where it touches the task list, so waiting on the browser blocks nothing.
+     */
     private fun launchGuarded(fallback: AppState, block: suspend () -> Unit) {
         job?.cancel()
-        job = viewModelScope.launch {
+        job = viewModelScope.launch(accountWork) {
             try {
-                serverLock.withLock { block() }
+                block()
             } catch (e: CancellationException) {
                 throw e
+            } catch (_: UnauthorizedException) {
+                onAccessRevoked()
             } catch (e: Exception) {
-                if (e is UnauthorizedException) store.clear()
                 report(e)
-                _state.value = if (e is UnauthorizedException) AppState.LoggedOut else fallback
+                _state.value = fallback
             }
         }
+    }
+
+    /**
+     * The server no longer accepts the app password. A task list on screen stays, read-only, so the user
+     * can copy what they still need before signing in again; without one there is nothing to keep.
+     */
+    private fun onAccessRevoked() {
+        if (_state.value !is AppState.Tasks) {
+            forgetAccount()
+            _error.value = "Signed out: the server no longer accepts this device's login."
+            return
+        }
+        accountWork.cancelChildren()
+        store.clear()
+        credentials = null
+        client = null
+        accessRevoked = true
+        publish()
+    }
+
+    /** Stops all work for the signed-in account, drops its data and shows the sign-in screen. */
+    private fun forgetAccount() {
+        accountWork.cancelChildren()
+        store.clear()
+        credentials = null
+        client = null
+        items = emptyMap()
+        accessRevoked = false
+        history.clear()
+        _state.value = AppState.LoggedOut
     }
 
     private fun report(e: Exception) {
