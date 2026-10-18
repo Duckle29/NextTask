@@ -14,6 +14,7 @@ import cc.sche.apps.nexttask.auth.normalizeServerUrl
 import cc.sche.apps.nexttask.auth.revokeAppPassword
 import cc.sche.apps.nexttask.caldav.CalDavClient
 import cc.sche.apps.nexttask.caldav.UnauthorizedException
+import cc.sche.apps.nexttask.ical.ICalDate
 import cc.sche.apps.nexttask.ical.ICalDateTime
 import cc.sche.apps.nexttask.ical.TaskExport
 import cc.sche.apps.nexttask.model.Edit
@@ -21,6 +22,7 @@ import cc.sche.apps.nexttask.model.EditHistory
 import cc.sche.apps.nexttask.model.Task
 import cc.sche.apps.nexttask.model.TaskChange
 import cc.sche.apps.nexttask.model.TaskCompletion
+import cc.sche.apps.nexttask.model.withLastModified
 import cc.sche.apps.nexttask.sync.AccountSnapshot
 import cc.sche.apps.nexttask.sync.CalendarHomeUnknownException
 import cc.sche.apps.nexttask.sync.CalendarSnapshot
@@ -120,6 +122,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _completedOrder = MutableStateFlow(preferences.completedOrder)
     val completedOrder: StateFlow<CompletedOrder> = _completedOrder.asStateFlow()
+
+    private val reminders = ReminderScheduler(application)
+
+    private val _remindersEnabled = MutableStateFlow(preferences.remindersEnabled)
+    val remindersEnabled: StateFlow<Boolean> = _remindersEnabled.asStateFlow()
 
     /** Undo and redo belong to the list they were made in. */
     private val histories = mutableMapOf<String, EditHistory>()
@@ -299,6 +306,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         repository?.snapshot?.value?.let(::publish)
     }
 
+    /** Shows task reminders as notifications on this device, or stops doing so. */
+    fun setRemindersEnabled(enabled: Boolean) {
+        _remindersEnabled.value = enabled
+        val snapshot = repository?.snapshot?.value
+        viewModelScope.launch(disk) { reminders.setEnabled(enabled, snapshot) }
+    }
+
     fun dismissMessage() {
         _message.value = null
     }
@@ -322,6 +336,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val parent = parentUid?.takeIf { uid -> list.currentTasks.any { it.uid == uid } }
         val task = Task.create(Uuid.random().toString(), text, parent, ICalDateTime.nowUtc())
         applyEdit(repository, list.href, Edit(listOf(TaskChange(before = null, after = task))))
+    }
+
+    /** Sets when a task is due, or with null removes its due date. Undo brings the previous one back. */
+    fun setDue(uid: String, due: ICalDate?) {
+        val (repository, list) = editable() ?: return
+        val task = list.tasks[uid]?.takeUnless { it.isDeleted }?.task ?: return
+        if (task.due == due) return
+        applyEdit(repository, list.href, Edit(listOf(TaskChange(before = task, after = task.copy(due = due).withLastModified(ICalDateTime.nowUtc())))))
     }
 
     /** Deletes a task together with all its subtasks. Undo brings them back. */
@@ -417,7 +439,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _syncStatus.value = SyncStatus()
 
             launch { repository.snapshot.collect(::publish) }
-            launch { repository.snapshot.collectLatest { snapshot -> withContext(disk) { snapshotStore.save(snapshot) } } }
+            launch {
+                repository.snapshot.collectLatest { snapshot ->
+                    withContext(disk) {
+                        snapshotStore.save(snapshot)
+                        reminders.update(snapshot)
+                    }
+                }
+            }
             requestSync(force = true)
         }
     }
@@ -514,7 +543,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun forgetAccount(deleteLocalCopy: Boolean) {
         accountWork.cancelChildren()
         credentialStore.clear()
-        if (deleteLocalCopy) viewModelScope.launch(disk) { snapshotStore.clear() }
+        viewModelScope.launch(disk) {
+            if (deleteLocalCopy) snapshotStore.clear()
+            reminders.clear()
+        }
         credentials = null
         repository = null
         accessRevoked = false

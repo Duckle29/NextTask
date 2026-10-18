@@ -1,9 +1,15 @@
 package cc.sche.apps.nexttask
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.Switch
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -100,7 +106,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import cc.sche.apps.nexttask.ical.ICalDate
 import cc.sche.apps.nexttask.ical.ICalDateTime
+import cc.sche.apps.nexttask.model.Task
+import androidx.compose.material.icons.outlined.Notifications
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import cc.sche.apps.nexttask.tree.TaskNode
 
 class MainActivity : ComponentActivity() {
@@ -109,6 +120,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Only a fresh launch: after a rotation the intent has been handled already.
+        if (savedInstanceState == null) openListFrom(intent)
         setContent {
             MaterialTheme {
                 App(viewModel)
@@ -116,9 +129,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        openListFrom(intent)
+    }
+
     override fun onStart() {
         super.onStart()
         viewModel.onForeground()
+    }
+
+    /** A tapped reminder opens the list its task is in. */
+    private fun openListFrom(intent: Intent) {
+        intent.getStringExtra(EXTRA_LIST)?.let(viewModel::selectList)
+    }
+
+    companion object {
+        const val EXTRA_LIST = "cc.sche.apps.nexttask.extra.LIST"
     }
 }
 
@@ -130,6 +157,7 @@ private fun App(viewModel: AppViewModel) {
     val refreshing by viewModel.refreshing.collectAsState()
     val history by viewModel.historyState.collectAsState()
     val completedOrder by viewModel.completedOrder.collectAsState()
+    val remindersEnabled by viewModel.remindersEnabled.collectAsState()
     var showPreferences by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showPreferences) { showPreferences = false }
 
@@ -155,6 +183,7 @@ private fun App(viewModel: AppViewModel) {
             onSetCompleted = viewModel::setCompleted,
             onAddTask = viewModel::addTask,
             onDeleteTask = viewModel::deleteTask,
+            onSetDue = viewModel::setDue,
             onExport = viewModel::exportTasks,
             onRefresh = viewModel::refresh,
             onSignOut = viewModel::signOut,
@@ -185,6 +214,8 @@ private fun App(viewModel: AppViewModel) {
             is AppState.Tasks -> PreferencesScreen(
                 completedOrder = completedOrder,
                 onCompletedOrderChange = viewModel::setCompletedOrder,
+                remindersEnabled = remindersEnabled,
+                onRemindersEnabledChange = viewModel::setRemindersEnabled,
                 onBack = { showPreferences = false },
             )
         }
@@ -305,6 +336,8 @@ private fun WaitingForBrowserScreen(loginUrl: String, onCancel: () -> Unit) {
 private fun PreferencesScreen(
     completedOrder: CompletedOrder,
     onCompletedOrderChange: (CompletedOrder) -> Unit,
+    remindersEnabled: Boolean,
+    onRemindersEnabledChange: (Boolean) -> Unit,
     onBack: () -> Unit,
 ) {
     var showLicenses by rememberSaveable { mutableStateOf(false) }
@@ -312,7 +345,7 @@ private fun PreferencesScreen(
         LicensesScreen(onBack = { showLicenses = false })
         return
     }
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -346,6 +379,7 @@ private fun PreferencesScreen(
             completedOrder,
             onCompletedOrderChange,
         )
+        RemindersPreference(remindersEnabled, onRemindersEnabledChange)
         Text(
             "About",
             style = MaterialTheme.typography.titleMedium,
@@ -364,6 +398,66 @@ private fun PreferencesScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+/**
+ * The switch for task reminders, and what keeps them from working: blocked notifications, or (Android 12+)
+ * no permission for exact alarms, which makes them late. Both are checked again on returning from settings.
+ */
+@Composable
+private fun RemindersPreference(enabled: Boolean, onEnabledChange: (Boolean) -> Unit) {
+    val context = LocalContext.current
+    val scheduler = remember { ReminderScheduler(context) }
+    var canNotify by remember { mutableStateOf(scheduler.canNotify) }
+    var onTime by remember { mutableStateOf(scheduler.canRemindOnTime) }
+    LifecycleResumeEffect(Unit) {
+        canNotify = scheduler.canNotify
+        onTime = scheduler.canRemindOnTime
+        onPauseOrDispose { }
+    }
+    val askToNotify = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { canNotify = scheduler.canNotify }
+
+    Text("Reminders", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp, bottom = 8.dp))
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .toggleable(value = enabled, role = Role.Switch) { on ->
+                onEnabledChange(on)
+                if (on && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !scheduler.canNotify) {
+                    askToNotify.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(end = 16.dp)) {
+            Text("Notify me of task reminders")
+            Text(
+                "Nextcloud doesn't send reminders for tasks. Leave this off if another app on this phone, " +
+                    "such as Tasks.org, already shows them. Reminders are as current as the last sync.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = enabled, onCheckedChange = null)
+    }
+    if (enabled && !canNotify) {
+        ReminderProblem("Notifications are turned off for NextTask.", "Allow") {
+            context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
+        }
+    } else if (enabled && !onTime && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        ReminderProblem("Reminders may come a few minutes late.", "Allow on time") {
+            context.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:${context.packageName}")))
+        }
+    }
+}
+
+@Composable
+private fun ReminderProblem(text: String, action: String, onAction: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+        TextButton(onClick = onAction) { Text(action) }
     }
 }
 
@@ -406,6 +500,7 @@ private fun TaskTreeScreen(
     onSetCompleted: (uid: String, completed: Boolean) -> Unit,
     onAddTask: (summary: String, parentUid: String?) -> Unit,
     onDeleteTask: (uid: String) -> Unit,
+    onSetDue: (uid: String, due: ICalDate?) -> Unit,
     onExport: (Uri) -> Unit,
     onRefresh: () -> Unit,
     onSignOut: () -> Unit,
@@ -478,6 +573,16 @@ private fun TaskTreeScreen(
             dismissButton = { TextButton(onClick = { confirmDeleteList = null }) { Text("Cancel") } },
         )
     }
+    var dueTaskUid by rememberSaveable { mutableStateOf<String?>(null) }
+    dueTaskUid?.let { uid -> findNode(tasks.active + tasks.completed, uid) }?.let { node ->
+        DuePickerDialog(
+            current = node.task.due?.resolve(ZoneId.systemDefault()),
+            onConfirm = { due -> dueTaskUid = null; onSetDue(node.uid, due) },
+            onDismiss = { dueTaskUid = null },
+        )
+    }
+    val onEditDue = { uid: String -> dueTaskUid = uid }
+    val onRemoveDue = { uid: String -> onSetDue(uid, null) }
     val onAddSubtask = { uid: String -> addParentUid = uid; adding = true }
     val onDelete = { node: TaskNode ->
         // Deleting a single task is undoable from the message that follows; a whole subtree asks first.
@@ -540,7 +645,7 @@ private fun TaskTreeScreen(
                     contentPadding = PaddingValues(bottom = 88.dp),
                 ) {
                     if (activeRows.isEmpty() && tasks.completed.isEmpty()) item { Text("No tasks.") }
-                    items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onDelete) }
+                    items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onEditDue, onRemoveDue, onDelete) }
                     if (tasks.completed.isNotEmpty()) {
                         item(key = "completed-header") {
                             val count = tasks.completed.size
@@ -561,7 +666,7 @@ private fun TaskTreeScreen(
                             }
                         }
                         if (completedSectionOpen) {
-                            items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onDelete) }
+                            items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onEditDue, onRemoveDue, onDelete) }
                         }
                     }
                 }
@@ -744,6 +849,8 @@ private fun TaskRow(
     onSetCompleted: (uid: String, completed: Boolean) -> Unit,
     onToggleCollapsed: (uid: String) -> Unit,
     onAddSubtask: (uid: String) -> Unit,
+    onEditDue: (uid: String) -> Unit,
+    onRemoveDue: (uid: String) -> Unit,
     onDelete: (TaskNode) -> Unit,
 ) {
     val task = row.node.task
@@ -774,6 +881,7 @@ private fun TaskRow(
             task.completed?.let(ICalDateTime::dateOf)?.let {
                 Text("Completed $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }
+            if (!task.isCompleted) DueLine(task)
         }
         if (!readOnly) {
             Box {
@@ -783,9 +891,41 @@ private fun TaskRow(
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     DropdownMenuItem(text = { Text("Add subtask") }, onClick = { menuOpen = false; onAddSubtask(task.uid) })
+                    DropdownMenuItem(
+                        text = { Text(if (task.due == null) "Set due date…" else "Change due date…") },
+                        onClick = { menuOpen = false; onEditDue(task.uid) },
+                    )
+                    if (task.due != null) {
+                        DropdownMenuItem(text = { Text("Remove due date") }, onClick = { menuOpen = false; onRemoveDue(task.uid) })
+                    }
                     DropdownMenuItem(text = { Text("Delete") }, onClick = { menuOpen = false; onDelete(row.node) })
                 }
             }
+        }
+    }
+}
+
+/** When an open task is due (red once overdue), and a bell if it has reminders. */
+@Composable
+private fun DueLine(task: Task) {
+    val now = ZonedDateTime.now()
+    val due = remember(task.due, now.zone) { task.due?.resolve(now.zone) }
+    if (due == null && !task.hasReminders) return
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (due != null) {
+            Text(
+                dueLabel(due, now),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (task.isOverdue(now)) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (task.hasReminders) {
+            Icon(
+                Icons.Outlined.Notifications,
+                contentDescription = "Has reminders",
+                modifier = Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

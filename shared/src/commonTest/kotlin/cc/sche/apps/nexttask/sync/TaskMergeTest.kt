@@ -45,9 +45,24 @@ class TaskMergeTest {
 
     @Test
     fun unmodelledPropertiesComeFromTheServer() {
-        val withDue = base.copy(unmapped = listOf(cc.sche.apps.nexttask.ical.Property("DUE", "20261020T120000Z")))
-        val merged = mergeTask(base, local = done(base), remote = withDue)
-        assertEquals(withDue.unmapped, merged.unmapped.filterNot { it.name == "LAST-MODIFIED" })
+        val withStart = base.copy(unmapped = listOf(cc.sche.apps.nexttask.ical.Property("DTSTART", "20261020T120000Z")))
+        val merged = mergeTask(base, local = done(base), remote = withStart)
+        assertEquals(withStart.unmapped, merged.unmapped.filterNot { it.name == "LAST-MODIFIED" })
+    }
+
+    @Test
+    fun aDueDateSetOfflineIsKept() {
+        val due = cc.sche.apps.nexttask.ical.ICalDate.ofDate(2026, 10, 20)
+        val merged = mergeTask(base, local = base.copy(due = due), remote = base.copy(summary = "Renamed"))
+        assertEquals(due, merged.due)
+        assertEquals("Renamed", merged.summary)
+    }
+
+    @Test
+    fun aDueDateChangedOnTheServerIsKept() {
+        val due = cc.sche.apps.nexttask.ical.ICalDate.ofUtc("20261020T100000Z")
+        val merged = mergeTask(base, local = done(base), remote = base.copy(due = due))
+        assertEquals(due, merged.due)
     }
 
     @Test

@@ -1,6 +1,7 @@
 package cc.sche.apps.nexttask.model
 
 import cc.sche.apps.nexttask.ical.Component
+import cc.sche.apps.nexttask.ical.ICalDate
 import cc.sche.apps.nexttask.ical.Property
 import kotlinx.serialization.Serializable
 
@@ -33,6 +34,8 @@ data class Task(
     val percentComplete: Int? = null,
     /** Raw iCalendar UTC date-time (`20261018T101500Z`), set while [status] is completed. */
     val completed: String? = null,
+    /** When the task is due (`DUE`), if it has a due date. */
+    val due: ICalDate? = null,
     /** UID of the parent task (`RELATED-TO;RELTYPE=PARENT`), or null for a top-level task. */
     val parentUid: String? = null,
     /** `X-APPLE-SORT-ORDER`, which Nextcloud Tasks uses for manual ordering among siblings. */

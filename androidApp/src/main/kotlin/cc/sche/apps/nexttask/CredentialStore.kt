@@ -28,6 +28,9 @@ class CredentialStore(context: Context) {
         }.getOrNull() // An unreadable blob (e.g. key lost, or an older format) is treated as logged out.
     }
 
+    /** True if credentials are stored, without decrypting them. */
+    val isSignedIn: Boolean get() = prefs.contains(KEY_BLOB)
+
     fun save(credentials: Credentials) {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())

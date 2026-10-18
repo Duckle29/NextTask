@@ -13,11 +13,12 @@ object TaskMapper {
     private const val PRIORITY = "PRIORITY"
     private const val PERCENT_COMPLETE = "PERCENT-COMPLETE"
     private const val COMPLETED = "COMPLETED"
+    private const val DUE = "DUE"
     private const val RELATED_TO = "RELATED-TO"
     private const val SORT_ORDER = "X-APPLE-SORT-ORDER"
 
     private val MAPPED = setOf(
-        UID, SUMMARY, DESCRIPTION, STATUS, PRIORITY, PERCENT_COMPLETE, COMPLETED, SORT_ORDER,
+        UID, SUMMARY, DESCRIPTION, STATUS, PRIORITY, PERCENT_COMPLETE, COMPLETED, DUE, SORT_ORDER,
     )
 
     fun fromIcs(ics: String): Task {
@@ -36,6 +37,7 @@ object TaskMapper {
             priority = todo.property(PRIORITY)?.value?.toIntOrNull() ?: 0,
             percentComplete = todo.property(PERCENT_COMPLETE)?.value?.toIntOrNull(),
             completed = todo.property(COMPLETED)?.value,
+            due = todo.property(DUE)?.let { ICalDate(it.value, it.params) },
             parentUid = parent?.value,
             sortOrder = todo.property(SORT_ORDER)?.value?.toIntOrNull(),
             unmapped = todo.properties.filter { it.name !in MAPPED && it !== parent },
@@ -64,6 +66,7 @@ object TaskMapper {
             if (task.priority != 0) add(Property(PRIORITY, task.priority.toString()))
             task.percentComplete?.let { add(Property(PERCENT_COMPLETE, it.toString())) }
             task.completed?.let { add(Property(COMPLETED, it)) }
+            task.due?.let { add(Property(DUE, it.value, it.params)) }
             task.parentUid?.let { add(Property(RELATED_TO, it, mapOf("RELTYPE" to "PARENT"))) }
             task.sortOrder?.let { add(Property(SORT_ORDER, it.toString())) }
             addAll(task.unmapped)

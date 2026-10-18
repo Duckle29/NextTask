@@ -1,6 +1,6 @@
 # NextTask privacy policy
 
-*Last updated: 18 October 2026*
+*Last updated: 19 October 2026*
 
 NextTask is an app for reading and editing the tasks stored on **your own Nextcloud server**. It is made by
 Mikkel Jeppesen ("I"). I do not run any server for the app, and I do not receive any data from it.
@@ -39,7 +39,10 @@ you.
 ## Permissions
 
 The app asks for internet access and for the state of the network connection (to sync when you are back online).
-It needs no other permission.
+
+If you turn on task reminders in the app's preferences, it also asks to show notifications, and it uses alarms
+(also after a restart of the device) to show each reminder on time. Reminders are worked out on your device from
+your tasks; nothing about them is sent anywhere.
 
 ## Other parties
 

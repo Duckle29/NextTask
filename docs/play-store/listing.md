@@ -11,7 +11,7 @@ NextTask
 
 Unofficial Nextcloud Tasks client: nested subtasks, offline sync, undo
 
-## Full description (1115/4000)
+## Full description (1251/4000)
 
 NextTask brings your Nextcloud Tasks to your phone, with subtasks nested as deep as you need and full use without a connection.
 
@@ -19,6 +19,8 @@ FEATURES
 • Subtasks within subtasks, with fold and unfold
 • All your task lists in a side drawer, one swipe away; create and delete lists, even offline
 • Check off, add and delete tasks and subtasks, with undo and redo
+• Due dates, with overdue tasks in red
+• Optional reminder notifications for your tasks' reminders, which Nextcloud itself doesn't send
 • Works offline: changes are kept on your device and sync automatically when you are back online
 • Completed tasks are collected in their own list
 • Pull down to refresh

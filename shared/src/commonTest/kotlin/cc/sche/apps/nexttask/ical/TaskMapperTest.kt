@@ -56,9 +56,21 @@ class TaskMapperTest {
         val task = TaskMapper.fromIcs(sample)
         val reparsed = TaskMapper.fromIcs(TaskMapper.toIcs(task))
         assertEquals(task, reparsed)
-        val due = reparsed.unmapped.single { it.name == "DUE" }
-        assertEquals("20261020T120000", due.value)
-        assertEquals("Europe/Copenhagen", due.params["TZID"])
+        assertEquals(ICalDate("20261020T120000", mapOf("TZID" to "Europe/Copenhagen")), reparsed.due)
+        assertTrue(reparsed.unmapped.none { it.name == "DUE" })
+    }
+
+    @Test
+    fun writesDueDates() {
+        val allDay = TaskMapper.toIcs(TaskMapper.fromIcs(sample).copy(due = ICalDate.ofDate(2026, 3, 7)))
+        assertTrue("DUE;VALUE=DATE:20260307" in allDay, allDay)
+        assertEquals(1, Regex("DUE").findAll(allDay).count())
+
+        val utc = TaskMapper.toIcs(TaskMapper.fromIcs(sample).copy(due = ICalDate.ofUtc("20261020T100000Z")))
+        assertTrue("DUE:20261020T100000Z" in utc, utc)
+
+        val none = TaskMapper.toIcs(TaskMapper.fromIcs(sample).copy(due = null))
+        assertTrue("DUE" !in none, none)
     }
 
     @Test

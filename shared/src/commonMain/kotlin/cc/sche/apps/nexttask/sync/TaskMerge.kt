@@ -10,7 +10,7 @@ import cc.sche.apps.nexttask.model.withLastModified
  * Each field that the user changed keeps the user's value; every other field takes the server's, so
  * edits made elsewhere in the meantime are not lost. If both sides changed the same field, the user's
  * edit wins. Status, percent and completion time count as one field, so they never end up out of step.
- * Properties this app does not edit (dates, categories, ...) always come from the server.
+ * Properties this app does not edit (start dates, categories, reminders, ...) always come from the server.
  */
 internal fun mergeTask(base: Task, local: Task, remote: Task): Task {
     fun <T> pick(field: (Task) -> T): T = if (field(local) != field(base)) field(local) else field(remote)
@@ -20,6 +20,7 @@ internal fun mergeTask(base: Task, local: Task, remote: Task): Task {
         summary = pick { it.summary },
         description = pick { it.description },
         priority = pick { it.priority },
+        due = pick { it.due },
         parentUid = pick { it.parentUid },
         sortOrder = pick { it.sortOrder },
         status = completion.status,
