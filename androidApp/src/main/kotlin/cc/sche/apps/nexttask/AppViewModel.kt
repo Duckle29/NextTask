@@ -1,6 +1,10 @@
 package cc.sche.apps.nexttask
 
 import android.app.Application
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.Uri
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import cc.sche.apps.nexttask.auth.Credentials
@@ -9,14 +13,17 @@ import cc.sche.apps.nexttask.auth.RedirectsToHttpsException
 import cc.sche.apps.nexttask.auth.normalizeServerUrl
 import cc.sche.apps.nexttask.auth.revokeAppPassword
 import cc.sche.apps.nexttask.caldav.CalDavClient
-import cc.sche.apps.nexttask.caldav.RemoteTask
 import cc.sche.apps.nexttask.caldav.UnauthorizedException
 import cc.sche.apps.nexttask.ical.ICalDateTime
+import cc.sche.apps.nexttask.ical.TaskExport
 import cc.sche.apps.nexttask.model.Edit
 import cc.sche.apps.nexttask.model.EditHistory
 import cc.sche.apps.nexttask.model.Task
 import cc.sche.apps.nexttask.model.TaskCompletion
 import cc.sche.apps.nexttask.model.withLastModified
+import cc.sche.apps.nexttask.sync.AccountSnapshot
+import cc.sche.apps.nexttask.sync.SyncReport
+import cc.sche.apps.nexttask.sync.TaskRepository
 import cc.sche.apps.nexttask.tree.CompletedOrder
 import cc.sche.apps.nexttask.tree.TaskNode
 import cc.sche.apps.nexttask.tree.TaskTree
@@ -24,24 +31,32 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpRequestRetry
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.IOException
 import java.net.UnknownHostException
 
 data class HistoryState(val canUndo: Boolean = false, val canRedo: Boolean = false)
 
+/** Progress of syncing with the server. [failure] is why the last attempt failed, until one succeeds. */
+data class SyncStatus(val syncing: Boolean = false, val failure: String? = null)
+
+/** A line shown above the content. */
+data class UiMessage(val text: String, val isError: Boolean)
+
 sealed interface AppState {
     data object LoggedOut : AppState
     data object Loading : AppState
-    /** Signed in, but the task list could not be fetched (offline, server down). */
+    /** Signed in, but there is no local copy yet and the first fetch failed (offline, server down). */
     data object LoadFailed : AppState
     /** The plain HTTP address the user entered redirects to HTTPS; ask before signing in there instead. */
     data class ConfirmHttps(val httpsServerUrl: String) : AppState
@@ -49,6 +64,7 @@ sealed interface AppState {
     data class WaitingForBrowser(val loginUrl: String) : AppState
     /**
      * [active] are the open top-level tasks; [completed] the done top-level tasks, last completed on top.
+     * [pendingChanges] counts tasks with edits the server has not received yet.
      * With [accessRevoked] the server no longer accepts the login: the list is the last known state, read-only.
      */
     data class Tasks(
@@ -56,12 +72,14 @@ sealed interface AppState {
         val active: List<TaskNode>,
         val completed: List<TaskNode>,
         val accessRevoked: Boolean = false,
+        val pendingChanges: Int = 0,
     ) : AppState
 }
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val store = CredentialStore(application)
+    private val credentialStore = CredentialStore(application)
+    private val snapshotStore = SnapshotStore(application)
     private val http = HttpClient(OkHttp) {
         // Every request URL is built from the account's server address. A redirect could only move
         // requests (and the credentials sent with them) somewhere the user did not choose.
@@ -91,79 +109,99 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** True while a pull-to-refresh is running; the list stays visible meanwhile. */
     val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
 
-    private val _error = MutableStateFlow<String?>(null)
-    val error: StateFlow<String?> = _error.asStateFlow()
+    private val _syncStatus = MutableStateFlow(SyncStatus())
+    val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
 
-    private var job: Job? = null
+    private val _message = MutableStateFlow<UiMessage?>(null)
+    val message: StateFlow<UiMessage?> = _message.asStateFlow()
+
+    private var loginJob: Job? = null
+    private var syncJob: Job? = null
+    private var syncAgain = false
+    private var lastSyncFinished = NEVER
 
     /** Parent of all work for the signed-in account, so signing out stops it in one go. */
     private val accountWork = SupervisorJob(viewModelScope.coroutineContext.job)
 
-    /** Serialises server round trips so ETags are never stale between consecutive writes. */
-    private val serverLock = Mutex()
+    /** Disk writes happen one at a time and in order, so a late save can never undo a sign-out's cleanup. */
+    private val disk = Dispatchers.IO.limitedParallelism(1)
 
     private var credentials: Credentials? = null
-    private var client: CalDavClient? = null
-    private var calendarName = ""
-    private var calendarHref = ""
-    private var items: Map<String, RemoteTask> = emptyMap()
+    private var repository: TaskRepository? = null
     private var accessRevoked = false
 
+    private val connectivity = application.getSystemService(ConnectivityManager::class.java)
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        // Back online: if the last sync failed (or edits are waiting), try again right away.
+        override fun onAvailable(network: Network) {
+            viewModelScope.launch { if (_syncStatus.value.failure != null) requestSync(force = true) }
+        }
+    }
+
     init {
-        val saved = store.load()
-        credentials = saved
-        if (saved == null) _state.value = AppState.LoggedOut else load(saved)
+        connectivity.registerDefaultNetworkCallback(networkCallback)
+        credentials = credentialStore.load()
+        credentials?.let(::startAccount) ?: run { _state.value = AppState.LoggedOut }
     }
 
     /** Starts the browser login; the UI opens [AppState.WaitingForBrowser.loginUrl]. */
     fun signIn(serverInput: String) {
         val serverUrl = normalizeServerUrl(serverInput)
         if (serverUrl == null) {
-            _error.value = "Enter a valid server address"
+            _message.value = UiMessage("Enter a valid server address", isError = true)
             return
         }
-        launchGuarded(fallback = AppState.LoggedOut) {
+        loginJob?.cancel()
+        loginJob = viewModelScope.launch(accountWork) {
             _state.value = AppState.Loading
-            val flow = LoginFlowV2(http, userAgent = "NextTask Android")
-            val session = try {
-                flow.start(serverUrl)
-            } catch (e: RedirectsToHttpsException) {
-                _state.value = AppState.ConfirmHttps(e.httpsServerUrl)
-                return@launchGuarded
-            }
-            _state.value = AppState.WaitingForBrowser(session.loginUrl)
-            val approved = flow.awaitCredentials(session)
-            store.save(approved)
-            credentials = approved
-            _state.value = AppState.Loading
-            // The login itself succeeded: a failure from here on must not send the user back to sign-in.
             try {
-                serverLock.withLock { fetchTasks(approved) }
+                val flow = LoginFlowV2(http, userAgent = "NextTask Android")
+                val session = try {
+                    flow.start(serverUrl)
+                } catch (e: RedirectsToHttpsException) {
+                    _state.value = AppState.ConfirmHttps(e.httpsServerUrl)
+                    return@launch
+                }
+                _state.value = AppState.WaitingForBrowser(session.loginUrl)
+                val approved = flow.awaitCredentials(session)
+                credentialStore.save(approved)
+                credentials = approved
+                startAccount(approved)
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: UnauthorizedException) {
-                throw e
             } catch (e: Exception) {
-                report(e)
-                _state.value = AppState.LoadFailed
+                _message.value = UiMessage(e.message ?: e::class.simpleName.orEmpty(), isError = true)
+                _state.value = AppState.LoggedOut
             }
         }
     }
 
     fun cancelSignIn() {
-        job?.cancel()
+        loginJob?.cancel()
         _state.value = AppState.LoggedOut
     }
 
+    /** Pull-to-refresh and the retry button: sync now, whatever happened recently. */
     fun refresh() {
-        val credentials = credentials ?: return
-        val current = _state.value
-        if (current is AppState.Tasks) refreshInPlace(credentials, current) else load(credentials)
+        val job = requestSync(force = true, userInitiated = true) ?: return
+        viewModelScope.launch {
+            _refreshing.value = true
+            try {
+                job.join()
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
+
+    /** The app came to the foreground: catch up with the server, unless that was done just now. */
+    fun onForeground() {
+        requestSync(force = false)
     }
 
     fun signOut() {
         val signedOut = credentials
-        forgetAccount()
+        forgetAccount(deleteLocalCopy = true)
         if (signedOut == null) return
         // Best effort: if this fails the app password stays valid on the server, so tell the user.
         viewModelScope.launch {
@@ -172,183 +210,228 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                _error.value = "Signed out, but the app password could not be revoked. " +
-                    "Remove it in Nextcloud under Settings → Security."
+                _message.value = UiMessage(
+                    "Signed out, but the app password could not be revoked. Remove it in Nextcloud under Settings → Security.",
+                    isError = true,
+                )
             }
         }
     }
 
-    /** Leaves the read-only list shown after a revoked login for the sign-in screen. */
+    /**
+     * Leaves the read-only list shown after a revoked login for the sign-in screen. The local copy stays, so
+     * signing in again as the same account still uploads the edits that never reached the server.
+     */
     fun signInAgain() {
-        forgetAccount()
+        forgetAccount(deleteLocalCopy = false)
     }
 
     fun setCompletedOrder(order: CompletedOrder) {
         preferences.completedOrder = order
         _completedOrder.value = order
-        if (_state.value is AppState.Tasks) publish()
+        repository?.snapshot?.value?.let(::publish)
     }
 
-    fun dismissError() {
-        _error.value = null
+    fun dismissMessage() {
+        _message.value = null
     }
 
-    /** Ticks or unticks a task. The list updates immediately; the server is written in the background. */
+    /** Ticks or unticks a task. The list updates at once, with or without a connection; the server follows. */
     fun setCompleted(uid: String, completed: Boolean) {
+        val repository = repository ?: return
         if (accessRevoked) return
         val now = ICalDateTime.nowUtc()
-        val tasks = items.values.map { it.task }
+        val snapshot = repository.snapshot.value
+        val tasks = snapshot.currentTasks
         val changed = if (completed) TaskCompletion.complete(tasks, uid, now) else TaskCompletion.reopen(tasks, uid, now)
         if (changed.isEmpty()) return
 
-        history.record(Edit(before = changed.map { items.getValue(it.uid).task }, after = changed))
-        commit(changed)
+        history.record(Edit(before = changed.map { snapshot.tasks.getValue(it.uid).task }, after = changed))
+        applyEdit(repository, changed)
     }
 
     fun undo() {
+        val repository = repository ?: return
         if (accessRevoked) return
         val edit = history.undo() ?: return
-        commit(edit.before.map { it.withLastModified(ICalDateTime.nowUtc()) })
+        applyEdit(repository, edit.before.map { it.withLastModified(ICalDateTime.nowUtc()) })
     }
 
     fun redo() {
+        val repository = repository ?: return
         if (accessRevoked) return
         val edit = history.redo() ?: return
-        commit(edit.after.map { it.withLastModified(ICalDateTime.nowUtc()) })
+        applyEdit(repository, edit.after.map { it.withLastModified(ICalDateTime.nowUtc()) })
     }
 
-    /** Applies [changed] to the visible list at once, then writes them to the server in order. */
-    private fun commit(changedTasks: List<Task>) {
-        // After a refresh a task may be gone (deleted elsewhere); there is nothing to restore for it.
-        val changed = changedTasks.filter { it.uid in items }
-        items = items + changed.associate { it.uid to items.getValue(it.uid).copy(task = it) }
-        publish()
-        if (changed.isEmpty()) return
-
-        viewModelScope.launch(accountWork) {
-            serverLock.withLock {
-                try {
-                    val client = client ?: return@withLock
-                    var needsRefetch = false
-                    for (task in changed) {
-                        val current = items.getValue(task.uid)
-                        val result = client.put(calendarHref, current.task, href = current.href, etag = current.etag)
-                        items = items + (task.uid to current.copy(etag = result.etag.orEmpty()))
-                        if (result.etag == null) needsRefetch = true
-                    }
-                    if (needsRefetch) credentials?.let { fetchTasks(it) }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: UnauthorizedException) {
-                    onAccessRevoked()
-                } catch (e: Exception) {
-                    report(e)
-                    // Show what the server really has instead of an optimistic state that failed to save.
-                    try {
-                        credentials?.let { fetchTasks(it) }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        // Keep the original error; the list stays as it was.
-                    }
-                }
-            }
-        }
-    }
-
-    private fun load(credentials: Credentials) {
-        launchGuarded(fallback = AppState.LoadFailed) {
-            _state.value = AppState.Loading
-            serverLock.withLock { fetchTasks(credentials) }
-        }
-    }
-
-    /** Re-syncs without replacing the list by a spinner; on failure the current list stays. */
-    private fun refreshInPlace(credentials: Credentials, current: AppState.Tasks) {
-        launchGuarded(fallback = current) {
-            _refreshing.value = true
+    /** Writes all tasks of the local copy as an iCalendar file to [uri], which the user picked. */
+    fun exportTasks(uri: Uri) {
+        val snapshot = repository?.snapshot?.value ?: return
+        // Not tied to the account: signing out right after must not cancel a half-written file.
+        viewModelScope.launch {
             try {
-                serverLock.withLock { fetchTasks(credentials) }
-            } finally {
-                _refreshing.value = false
+                withContext(Dispatchers.IO) {
+                    val ics = TaskExport.toIcs(snapshot.currentTasks, snapshot.calendarName)
+                    val output = getApplication<Application>().contentResolver.openOutputStream(uri, "wt")
+                        ?: throw IOException("Could not open the file")
+                    output.use { it.write(ics.encodeToByteArray()) }
+                }
+                val count = snapshot.tasks.size
+                _message.value = UiMessage("Exported $count ${if (count == 1) "task" else "tasks"}", isError = false)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _message.value = UiMessage("Export failed: ${e.message ?: e::class.simpleName}", isError = true)
             }
         }
     }
 
-    private suspend fun fetchTasks(credentials: Credentials) {
-        val client = CalDavClient(http, credentials)
-        val calendar = client.discoverTaskCalendars().firstOrNull()
-            ?: throw IllegalStateException("No task list found on this account")
-        val synced = client.sync(calendar.href, syncToken = null).changed
-
-        this.client = client
-        calendarName = calendar.displayName
-        calendarHref = calendar.href
-        items = synced.associateBy { it.task.uid }
-        publish()
-    }
-
-    private fun publish() {
-        _historyState.value = HistoryState(history.canUndo && !accessRevoked, history.canRedo && !accessRevoked)
-        val (completed, active) = TaskTree.build(items.values.map { it.task }, _completedOrder.value).partition { it.task.isCompleted }
-        _state.value = AppState.Tasks(calendarName, active, completed, accessRevoked)
+    private fun applyEdit(repository: TaskRepository, changed: List<Task>) {
+        repository.edit(changed)
+        updateHistoryState()
+        requestSync(force = true)
     }
 
     /**
-     * Runs [block], turning failures into a visible error, or [onAccessRevoked] for a revoked login.
-     * [block] takes [serverLock] itself where it touches the task list, so waiting on the browser blocks nothing.
+     * Opens the local copy of [credentials]' account, shows it at once, and syncs in the background. A saved
+     * copy that belongs to another account (or an older format) is not used.
      */
-    private fun launchGuarded(fallback: AppState, block: suspend () -> Unit) {
-        job?.cancel()
-        job = viewModelScope.launch(accountWork) {
-            try {
-                block()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: UnauthorizedException) {
-                onAccessRevoked()
-            } catch (e: Exception) {
-                report(e)
-                _state.value = fallback
-            }
+    private fun startAccount(credentials: Credentials) {
+        viewModelScope.launch(accountWork) {
+            val saved = withContext(disk) { snapshotStore.load() }
+                ?.takeIf { it.belongsTo(credentials.serverUrl, credentials.loginName) }
+            val repository = TaskRepository(
+                CalDavClient(http, credentials),
+                saved ?: AccountSnapshot(credentials.serverUrl, credentials.loginName),
+            )
+            this@AppViewModel.repository = repository
+            accessRevoked = false
+            _syncStatus.value = SyncStatus()
+
+            launch { repository.snapshot.collect(::publish) }
+            launch { repository.snapshot.collectLatest { snapshot -> withContext(disk) { snapshotStore.save(snapshot) } } }
+            requestSync(force = true)
         }
+    }
+
+    /**
+     * Starts a sync unless one is running (then it runs once more afterwards, so nothing made meanwhile is
+     * missed). Without [force], a sync that finished a moment ago counts as recent enough.
+     */
+    private fun requestSync(force: Boolean, userInitiated: Boolean = false): Job? {
+        val repository = repository ?: return null
+        if (accessRevoked) return null
+        syncJob?.takeIf { it.isActive }?.let { running ->
+            if (force) syncAgain = true
+            return running
+        }
+        if (!force && SystemClock.elapsedRealtime() - lastSyncFinished < RECENT_SYNC_MS) return null
+        val job = viewModelScope.launch(accountWork) {
+            do {
+                syncAgain = false
+                runSync(repository, userInitiated)
+            } while (syncAgain)
+        }
+        syncJob = job
+        return job
+    }
+
+    private suspend fun runSync(repository: TaskRepository, userInitiated: Boolean) {
+        val hadData = repository.snapshot.value.isSynced
+        if (!hadData) _state.value = AppState.Loading
+        _syncStatus.value = _syncStatus.value.copy(syncing = true)
+        try {
+            val report = repository.sync()
+            lastSyncFinished = SystemClock.elapsedRealtime()
+            _syncStatus.value = SyncStatus()
+            describe(report)?.let { _message.value = UiMessage(it, isError = false) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: UnauthorizedException) {
+            onAccessRevoked()
+        } catch (e: Exception) {
+            val reason = describe(e)
+            _syncStatus.value = SyncStatus(failure = reason)
+            // With a list on screen, going offline is normal and the status line says so; otherwise
+            // there is nothing to show, and a refresh the user asked for deserves an answer.
+            if (!hadData) _state.value = AppState.LoadFailed
+            if (userInitiated || !hadData) _message.value = UiMessage(reason, isError = true)
+        }
+    }
+
+    private fun publish(snapshot: AccountSnapshot) {
+        updateHistoryState()
+        // Until the first sync has finished there is nothing to show; the spinner or error screen stays.
+        if (!snapshot.isSynced) return
+        val (completed, active) = TaskTree.build(snapshot.currentTasks, _completedOrder.value).partition { it.task.isCompleted }
+        _state.value = AppState.Tasks(snapshot.calendarName, active, completed, accessRevoked, snapshot.pendingChanges)
+    }
+
+    private fun updateHistoryState() {
+        _historyState.value = HistoryState(history.canUndo && !accessRevoked, history.canRedo && !accessRevoked)
     }
 
     /**
      * The server no longer accepts the app password. A task list on screen stays, read-only, so the user
-     * can copy what they still need before signing in again; without one there is nothing to keep.
+     * can copy or export what they still need before signing in again; without one there is nothing to keep.
      */
     private fun onAccessRevoked() {
         if (_state.value !is AppState.Tasks) {
-            forgetAccount()
-            _error.value = "Signed out: the server no longer accepts this device's login."
+            forgetAccount(deleteLocalCopy = false)
+            _message.value = UiMessage("Signed out: the server no longer accepts this device's login.", isError = true)
             return
         }
-        accountWork.cancelChildren()
-        store.clear()
+        credentialStore.clear()
         credentials = null
-        client = null
         accessRevoked = true
-        publish()
+        _syncStatus.value = SyncStatus()
+        repository?.snapshot?.value?.let(::publish)
     }
 
-    /** Stops all work for the signed-in account, drops its data and shows the sign-in screen. */
-    private fun forgetAccount() {
+    /** Stops all work for the signed-in account, drops its credentials and shows the sign-in screen. */
+    private fun forgetAccount(deleteLocalCopy: Boolean) {
         accountWork.cancelChildren()
-        store.clear()
+        credentialStore.clear()
+        if (deleteLocalCopy) viewModelScope.launch(disk) { snapshotStore.clear() }
         credentials = null
-        client = null
-        items = emptyMap()
+        repository = null
         accessRevoked = false
+        syncJob = null
+        syncAgain = false
+        lastSyncFinished = NEVER
         history.clear()
+        updateHistoryState()
+        _syncStatus.value = SyncStatus()
         _state.value = AppState.LoggedOut
     }
 
-    private fun report(e: Exception) {
-        _error.value = e.message ?: e::class.simpleName
+    /** What a sync did that the user should hear about, or null if it was just a transfer. */
+    private fun describe(report: SyncReport): String? {
+        val notes = buildList {
+            if (report.mergedEdits > 0) {
+                add("${report.mergedEdits} offline ${if (report.mergedEdits == 1) "change was" else "changes were"} merged with newer changes from the server")
+            }
+            if (report.discardedEdits > 0) {
+                add("${report.discardedEdits} offline ${if (report.discardedEdits == 1) "change was" else "changes were"} dropped because the task was deleted on the server")
+            }
+        }
+        return notes.joinToString(". ").ifEmpty { null }
     }
 
+    private fun describe(e: Exception): String =
+        if (generateSequence<Throwable>(e) { it.cause }.any { it is IOException }) {
+            "No connection to the server"
+        } else {
+            e.message ?: e::class.simpleName.orEmpty()
+        }
+
     override fun onCleared() {
+        connectivity.unregisterNetworkCallback(networkCallback)
         http.close()
+    }
+
+    private companion object {
+        const val NEVER = Long.MIN_VALUE / 2
+        const val RECENT_SYNC_MS = 30_000L
     }
 }

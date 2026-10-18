@@ -5,7 +5,10 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -69,25 +72,33 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import cc.sche.apps.nexttask.ical.ICalDateTime
 import cc.sche.apps.nexttask.tree.TaskNode
 
 class MainActivity : ComponentActivity() {
+
+    private val viewModel: AppViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {
-                App()
+                App(viewModel)
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.onForeground()
     }
 }
 
 @Composable
-private fun App(viewModel: AppViewModel = viewModel()) {
+private fun App(viewModel: AppViewModel) {
     val state by viewModel.state.collectAsState()
-    val error by viewModel.error.collectAsState()
+    val message by viewModel.message.collectAsState()
+    val syncStatus by viewModel.syncStatus.collectAsState()
     val refreshing by viewModel.refreshing.collectAsState()
     val history by viewModel.historyState.collectAsState()
     val completedOrder by viewModel.completedOrder.collectAsState()
@@ -95,10 +106,14 @@ private fun App(viewModel: AppViewModel = viewModel()) {
     BackHandler(enabled = showPreferences) { showPreferences = false }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        error?.let {
+        message?.let {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
-                TextButton(onClick = viewModel::dismissError) { Text("Dismiss") }
+                Text(
+                    it.text,
+                    color = if (it.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = viewModel::dismissMessage) { Text("Dismiss") }
             }
         }
         when (val current = state) {
@@ -114,6 +129,7 @@ private fun App(viewModel: AppViewModel = viewModel()) {
             is AppState.WaitingForBrowser -> WaitingForBrowserScreen(current.loginUrl, onCancel = viewModel::cancelSignIn)
             AppState.LoadFailed -> Centered {
                 Text("Could not load your tasks.")
+                syncStatus.failure?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 Button(onClick = viewModel::refresh) { Text("Retry") }
                 TextButton(onClick = viewModel::signOut) { Text("Sign out") }
             }
@@ -124,11 +140,13 @@ private fun App(viewModel: AppViewModel = viewModel()) {
             ) else TaskTreeScreen(
                 tasks = current,
                 refreshing = refreshing,
+                syncStatus = syncStatus,
                 history = history,
                 onOpenPreferences = { showPreferences = true },
                 onUndo = viewModel::undo,
                 onRedo = viewModel::redo,
                 onSetCompleted = viewModel::setCompleted,
+                onExport = viewModel::exportTasks,
                 onRefresh = viewModel::refresh,
                 onSignOut = viewModel::signOut,
                 onSignInAgain = viewModel::signInAgain,
@@ -304,15 +322,35 @@ private fun CompletedOrderOption(
 private fun TaskTreeScreen(
     tasks: AppState.Tasks,
     refreshing: Boolean,
+    syncStatus: SyncStatus,
     history: HistoryState,
     onOpenPreferences: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onSetCompleted: (uid: String, completed: Boolean) -> Unit,
+    onExport: (Uri) -> Unit,
     onRefresh: () -> Unit,
     onSignOut: () -> Unit,
     onSignInAgain: () -> Unit,
 ) {
+    var confirmSignOut by remember { mutableStateOf(false) }
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(EXPORT_MIME_TYPE)) { uri ->
+        if (uri != null) onExport(uri)
+    }
+    if (confirmSignOut) {
+        AlertDialog(
+            onDismissRequest = { confirmSignOut = false },
+            title = { Text("Sign out with unsynced changes?") },
+            text = {
+                Text(
+                    "${tasks.pendingChanges} ${if (tasks.pendingChanges == 1) "change hasn't" else "changes haven't"} reached the " +
+                        "server yet and will be lost. You can export your tasks first.",
+                )
+            },
+            confirmButton = { TextButton(onClick = { confirmSignOut = false; onSignOut() }) { Text("Sign out") } },
+            dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Cancel") } },
+        )
+    }
     var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var completedSectionOpen by rememberSaveable { mutableStateOf(true) }
     val activeRows = remember(tasks.active, collapsed) { tasks.active.flatMap { visibleRows(it, collapsed) } }
@@ -333,7 +371,17 @@ private fun TaskTreeScreen(
                         DropdownMenuItem(text = { Text("Refresh") }, onClick = { menuOpen = false; onRefresh() })
                     }
                     DropdownMenuItem(text = { Text("Preferences") }, onClick = { menuOpen = false; onOpenPreferences() })
-                    DropdownMenuItem(text = { Text("Sign out") }, onClick = { menuOpen = false; onSignOut() })
+                    DropdownMenuItem(
+                        text = { Text("Export tasks…") },
+                        onClick = { menuOpen = false; exportLauncher.launch(exportFileName(tasks.calendarName)) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Sign out") },
+                        onClick = {
+                            menuOpen = false
+                            if (tasks.pendingChanges > 0) confirmSignOut = true else onSignOut()
+                        },
+                    )
                 }
             }
             Text(tasks.calendarName, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
@@ -345,6 +393,7 @@ private fun TaskTreeScreen(
             }
         }
         if (tasks.accessRevoked) SignedOutBanner(onSignInAgain)
+        SyncStatusLine(tasks.pendingChanges, syncStatus)
         PullToRefreshBox(
             isRefreshing = refreshing,
             onRefresh = onRefresh,
@@ -383,6 +432,24 @@ private fun TaskTreeScreen(
             }
         }
     }
+}
+
+@Composable
+private fun SyncStatusLine(pendingChanges: Int, status: SyncStatus) {
+    val changes = "$pendingChanges ${if (pendingChanges == 1) "change" else "changes"}"
+    val text = when {
+        status.failure != null && pendingChanges > 0 -> "$changes waiting to sync · ${status.failure}"
+        status.failure != null -> "Showing the saved copy · ${status.failure}"
+        pendingChanges > 0 && status.syncing -> "Syncing $changes…"
+        pendingChanges > 0 -> "$changes waiting to sync"
+        else -> return
+    }
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = if (status.failure != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 12.dp, bottom = 4.dp),
+    )
 }
 
 @Composable
@@ -446,6 +513,15 @@ private fun TaskRow(
 }
 
 private val FOLD_TARGET_SIZE = 32.dp
+
+private const val EXPORT_MIME_TYPE = "text/calendar"
+
+/** `<list name>-2026-10-18.ics`, without characters that file systems reject. */
+private fun exportFileName(calendarName: String): String {
+    val name = calendarName.replace(Regex("""[\\/:*?"<>|]"""), "_").trim().ifEmpty { "tasks" }
+    val date = ICalDateTime.dateOf(ICalDateTime.nowUtc())
+    return "$name-$date.ics"
+}
 
 @Composable
 private fun FoldIcon(expanded: Boolean) {

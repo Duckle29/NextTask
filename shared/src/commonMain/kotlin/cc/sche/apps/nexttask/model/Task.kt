@@ -2,7 +2,9 @@ package cc.sche.apps.nexttask.model
 
 import cc.sche.apps.nexttask.ical.Component
 import cc.sche.apps.nexttask.ical.Property
+import kotlinx.serialization.Serializable
 
+@Serializable
 enum class TaskStatus(val ical: String) {
     NeedsAction("NEEDS-ACTION"),
     InProcess("IN-PROCESS"),
@@ -21,6 +23,7 @@ enum class TaskStatus(val ical: String) {
  * Properties this app does not model are kept verbatim in [unmapped], [calendarProperties] and
  * [calendarComponents] so that a read-modify-write never drops data written by other clients.
  */
+@Serializable
 data class Task(
     val uid: String,
     val summary: String,

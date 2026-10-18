@@ -1,6 +1,9 @@
 package cc.sche.apps.nexttask.ical
 
+import kotlinx.serialization.Serializable
+
 /** A single iCalendar content line, e.g. `RELATED-TO;RELTYPE=PARENT:abc`. */
+@Serializable
 data class Property(
     val name: String,
     val value: String,
@@ -8,6 +11,7 @@ data class Property(
 )
 
 /** A component such as VCALENDAR, VTODO or VTIMEZONE. */
+@Serializable
 data class Component(
     val name: String,
     val properties: List<Property> = emptyList(),

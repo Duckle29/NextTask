@@ -2,4 +2,5 @@
 <!-- Android 11 and older; see data_extraction_rules.xml. -->
 <full-backup-content>
     <exclude domain="sharedpref" path="credentials.xml" />
+    <exclude domain="file" path="account_snapshot.json" />
 </full-backup-content>
