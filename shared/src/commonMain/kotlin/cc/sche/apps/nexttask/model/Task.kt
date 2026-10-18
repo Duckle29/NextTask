@@ -20,8 +20,8 @@ enum class TaskStatus(val ical: String) {
 /**
  * A VTODO as exposed by Nextcloud Tasks over CalDAV.
  *
- * Properties this app does not model are kept verbatim in [unmapped], [calendarProperties] and
- * [calendarComponents] so that a read-modify-write never drops data written by other clients.
+ * Properties this app does not model are kept verbatim in [unmapped], [subcomponents], [calendarProperties]
+ * and [calendarComponents] so that a read-modify-write never drops data written by other clients.
  */
 @Serializable
 data class Task(
@@ -38,6 +38,8 @@ data class Task(
     /** `X-APPLE-SORT-ORDER`, which Nextcloud Tasks uses for manual ordering among siblings. */
     val sortOrder: Int? = null,
     val unmapped: List<Property> = emptyList(),
+    /** Components nested in the VTODO, such as reminders (`VALARM`). */
+    val subcomponents: List<Component> = emptyList(),
     val calendarProperties: List<Property> = DEFAULT_CALENDAR_PROPERTIES,
     val calendarComponents: List<Component> = emptyList(),
 ) {

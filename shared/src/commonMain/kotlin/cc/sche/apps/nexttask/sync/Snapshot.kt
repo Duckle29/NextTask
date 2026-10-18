@@ -81,6 +81,8 @@ data class AccountSnapshot(
         this.serverUrl == serverUrl && this.loginName == loginName && schemaVersion == SCHEMA_VERSION
 
     companion object {
-        const val SCHEMA_VERSION = 2
+        // 3: tasks keep their nested components (reminders). Older copies lack them, and uploading an edit
+        // made from such a copy would delete the reminders on the server, so they are re-synced instead.
+        const val SCHEMA_VERSION = 3
     }
 }

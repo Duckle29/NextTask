@@ -39,6 +39,7 @@ object TaskMapper {
             parentUid = parent?.value,
             sortOrder = todo.property(SORT_ORDER)?.value?.toIntOrNull(),
             unmapped = todo.properties.filter { it.name !in MAPPED && it !== parent },
+            subcomponents = todo.components,
             calendarProperties = calendar.properties,
             calendarComponents = calendar.components.filter { it.name != "VTODO" },
         )
@@ -67,7 +68,7 @@ object TaskMapper {
             task.sortOrder?.let { add(Property(SORT_ORDER, it.toString())) }
             addAll(task.unmapped)
         }
-        return Component("VTODO", properties)
+        return Component("VTODO", properties, task.subcomponents)
     }
 
     private fun Property.isParentRelation(): Boolean =

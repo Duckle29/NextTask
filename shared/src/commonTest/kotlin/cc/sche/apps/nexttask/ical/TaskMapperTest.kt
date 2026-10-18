@@ -100,4 +100,31 @@ class TaskMapperTest {
             TaskMapper.fromIcs(sample.replace("END:VCALENDAR", ""))
         }
     }
+
+    @Test
+    fun keepsRemindersAndOtherNestedComponentsThroughAnEdit() {
+        val withReminder = """
+            BEGIN:VCALENDAR
+            VERSION:2.0
+            BEGIN:VTODO
+            UID:t-1
+            SUMMARY:Call the dentist
+            DUE;VALUE=DATE:20261020
+            BEGIN:VALARM
+            ACTION:DISPLAY
+            DESCRIPTION:Reminder
+            TRIGGER;RELATED=START:-PT15M
+            END:VALARM
+            END:VTODO
+            END:VCALENDAR
+        """.trimIndent()
+
+        val edited = TaskMapper.fromIcs(withReminder).copy(status = TaskStatus.Completed)
+        val written = TaskMapper.toIcs(edited)
+
+        assertTrue("BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER;RELATED=START:-PT15M\r\nEND:VALARM" in written, written)
+        assertTrue("DUE;VALUE=DATE:20261020" in written, written)
+        assertTrue(written.indexOf("BEGIN:VALARM") < written.indexOf("END:VTODO"), "the reminder stays inside the task: $written")
+        assertEquals(TaskMapper.fromIcs(written), edited)
+    }
 }
