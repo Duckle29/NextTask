@@ -4,8 +4,6 @@ title: Nextcloud Tasks on Android
 
 <p><img src="images/icon.png" alt="" width="96" height="96"></p>
 
-# NextTask
-
 **An unofficial Nextcloud Tasks client for Android, with nested subtasks, offline sync and undo.**
 
 NextTask brings your [Nextcloud Tasks](https://apps.nextcloud.com/apps/tasks) to your phone, with subtasks
