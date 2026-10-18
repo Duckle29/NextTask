@@ -22,6 +22,7 @@ import cc.sche.apps.nexttask.model.Task
 import cc.sche.apps.nexttask.model.TaskChange
 import cc.sche.apps.nexttask.model.TaskCompletion
 import cc.sche.apps.nexttask.sync.AccountSnapshot
+import cc.sche.apps.nexttask.sync.CalendarSnapshot
 import cc.sche.apps.nexttask.sync.SyncReport
 import cc.sche.apps.nexttask.sync.TaskRepository
 import cc.sche.apps.nexttask.tree.CompletedOrder
@@ -64,18 +65,25 @@ sealed interface AppState {
     /** The user has been sent to the browser and we are waiting for them to approve. */
     data class WaitingForBrowser(val loginUrl: String) : AppState
     /**
-     * [active] are the open top-level tasks; [completed] the done top-level tasks, last completed on top.
-     * [pendingChanges] counts tasks with edits the server has not received yet.
-     * With [accessRevoked] the server no longer accepts the login: the list is the last known state, read-only.
+     * The tasks of the [selectedHref] list out of all the account's [lists]: [active] are its open top-level
+     * tasks and [completed] the done top-level tasks, last completed on top.
+     * [pendingChanges] counts tasks (in all lists) with edits the server has not received yet.
+     * With [accessRevoked] the server no longer accepts the login: the lists are the last known state, read-only.
      */
     data class Tasks(
-        val calendarName: String,
+        val lists: List<TaskList>,
+        val selectedHref: String,
         val active: List<TaskNode>,
         val completed: List<TaskNode>,
         val accessRevoked: Boolean = false,
         val pendingChanges: Int = 0,
-    ) : AppState
+    ) : AppState {
+        val calendarName: String get() = lists.firstOrNull { it.href == selectedHref }?.name.orEmpty()
+    }
 }
+
+/** A task list of the account, as shown in the side drawer. */
+data class TaskList(val href: String, val name: String, val color: String?, val pendingChanges: Int)
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -101,7 +109,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _completedOrder = MutableStateFlow(preferences.completedOrder)
     val completedOrder: StateFlow<CompletedOrder> = _completedOrder.asStateFlow()
 
-    private val history = EditHistory()
+    /** Undo and redo belong to the list they were made in. */
+    private val histories = mutableMapOf<String, EditHistory>()
+    private var selectedHref: String? = preferences.selectedList
 
     private val _historyState = MutableStateFlow(HistoryState())
     val historyState: StateFlow<HistoryState> = _historyState.asStateFlow()
@@ -119,6 +129,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var loginJob: Job? = null
     private var syncJob: Job? = null
     private var syncAgain = false
+    private var syncAgainFull = false
     private var lastSyncFinished = NEVER
 
     /** Parent of all work for the signed-in account, so signing out stops it in one go. */
@@ -227,6 +238,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         forgetAccount(deleteLocalCopy = false)
     }
 
+    /** Shows another of the account's task lists. */
+    fun selectList(href: String) {
+        selectedHref = href
+        preferences.selectedList = href
+        repository?.snapshot?.value?.let(::publish)
+    }
+
     fun setCompletedOrder(order: CompletedOrder) {
         preferences.completedOrder = order
         _completedOrder.value = order
@@ -239,71 +257,77 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Ticks or unticks a task. The list updates at once, with or without a connection; the server follows. */
     fun setCompleted(uid: String, completed: Boolean) {
-        val repository = repository ?: return
-        if (accessRevoked) return
+        val (repository, list) = editable() ?: return
         val now = ICalDateTime.nowUtc()
-        val snapshot = repository.snapshot.value
-        val tasks = snapshot.currentTasks
+        val tasks = list.currentTasks
         val changed = if (completed) TaskCompletion.complete(tasks, uid, now) else TaskCompletion.reopen(tasks, uid, now)
         if (changed.isEmpty()) return
 
-        applyEdit(repository, Edit(changed.map { TaskChange(before = snapshot.tasks.getValue(it.uid).task, after = it) }))
+        applyEdit(repository, list.href, Edit(changed.map { TaskChange(before = list.tasks.getValue(it.uid).task, after = it) }))
     }
 
-    /** Adds a task, under [parentUid] if given. It shows up at once, with or without a connection. */
+    /** Adds a task to the selected list, under [parentUid] if given. It shows up at once, with or without a connection. */
     fun addTask(summary: String, parentUid: String?) {
-        val repository = repository ?: return
-        if (accessRevoked) return
+        val (repository, list) = editable() ?: return
         val text = summary.trim()
         if (text.isEmpty()) return
-        val parent = parentUid?.takeIf { uid -> repository.snapshot.value.currentTasks.any { it.uid == uid } }
+        val parent = parentUid?.takeIf { uid -> list.currentTasks.any { it.uid == uid } }
         val task = Task.create(Uuid.random().toString(), text, parent, ICalDateTime.nowUtc())
-        applyEdit(repository, Edit(listOf(TaskChange(before = null, after = task))))
+        applyEdit(repository, list.href, Edit(listOf(TaskChange(before = null, after = task))))
     }
 
     /** Deletes a task together with all its subtasks. Undo brings them back. */
     fun deleteTask(uid: String) {
-        val repository = repository ?: return
-        if (accessRevoked) return
-        val snapshot = repository.snapshot.value
-        val doomed = TaskTree.subtreeUids(snapshot.currentTasks, uid)
-        val changes = doomed.mapNotNull { snapshot.tasks[it]?.takeUnless { stored -> stored.isDeleted }?.task }
+        val (repository, list) = editable() ?: return
+        val doomed = TaskTree.subtreeUids(list.currentTasks, uid)
+        val changes = doomed.mapNotNull { list.tasks[it]?.takeUnless { stored -> stored.isDeleted }?.task }
             .map { TaskChange(before = it, after = null) }
         if (changes.isEmpty()) return
-        applyEdit(repository, Edit(changes))
+        applyEdit(repository, list.href, Edit(changes))
         val count = changes.size
         _message.value = UiMessage("Deleted $count ${if (count == 1) "task" else "tasks"}", isError = false, undoable = true)
     }
 
     fun undo() {
-        val repository = repository ?: return
-        if (accessRevoked) return
-        val edit = history.undo() ?: return
-        repository.apply(edit.inverse().stamped(ICalDateTime.nowUtc()))
+        val (repository, list) = editable() ?: return
+        val edit = history(list.href).undo() ?: return
+        repository.apply(list.href, edit.inverse().stamped(ICalDateTime.nowUtc()))
         afterEdit()
     }
 
     fun redo() {
-        val repository = repository ?: return
-        if (accessRevoked) return
-        val edit = history.redo() ?: return
-        repository.apply(edit.stamped(ICalDateTime.nowUtc()))
+        val (repository, list) = editable() ?: return
+        val edit = history(list.href).redo() ?: return
+        repository.apply(list.href, edit.stamped(ICalDateTime.nowUtc()))
         afterEdit()
     }
 
+    /** The repository and the selected list, unless there is nothing to edit (not loaded yet, or read-only). */
+    private fun editable(): Pair<TaskRepository, CalendarSnapshot>? {
+        if (accessRevoked) return null
+        val repository = repository ?: return null
+        val list = selected(repository.snapshot.value) ?: return null
+        return repository to list
+    }
+
+    private fun selected(snapshot: AccountSnapshot): CalendarSnapshot? =
+        snapshot.calendar(selectedHref) ?: snapshot.calendars.firstOrNull()
+
+    private fun history(href: String) = histories.getOrPut(href) { EditHistory() }
+
     /** Writes all tasks of the local copy as an iCalendar file to [uri], which the user picked. */
     fun exportTasks(uri: Uri) {
-        val snapshot = repository?.snapshot?.value ?: return
+        val list = repository?.snapshot?.value?.let(::selected) ?: return
         // Not tied to the account: signing out right after must not cancel a half-written file.
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val ics = TaskExport.toIcs(snapshot.currentTasks, snapshot.calendarName)
+                    val ics = TaskExport.toIcs(list.currentTasks, list.name)
                     val output = getApplication<Application>().contentResolver.openOutputStream(uri, "wt")
                         ?: throw IOException("Could not open the file")
                     output.use { it.write(ics.encodeToByteArray()) }
                 }
-                val count = snapshot.tasks.size
+                val count = list.currentTasks.size
                 _message.value = UiMessage("Exported $count ${if (count == 1) "task" else "tasks"}", isError = false)
             } catch (e: CancellationException) {
                 throw e
@@ -314,9 +338,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Does what the user did, remembers it for undo, and starts syncing it. */
-    private fun applyEdit(repository: TaskRepository, edit: Edit) {
-        history.record(edit)
-        repository.apply(edit)
+    private fun applyEdit(repository: TaskRepository, href: String, edit: Edit) {
+        history(href).record(edit)
+        repository.apply(href, edit)
         afterEdit()
     }
 
@@ -324,7 +348,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // An "Undo" offered for an earlier edit no longer means what it says.
         if (_message.value?.undoable == true) _message.value = null
         updateHistoryState()
-        requestSync(force = true)
+        // Right after an edit only the lists with changes waiting need talking to the server.
+        requestSync(force = true, full = false)
     }
 
     /**
@@ -351,33 +376,41 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Starts a sync unless one is running (then it runs once more afterwards, so nothing made meanwhile is
-     * missed). Without [force], a sync that finished a moment ago counts as recent enough.
+     * missed). A [full] sync also looks for added, renamed and removed lists and catches up on all of them;
+     * otherwise only lists with changes waiting are synced. Without [force], a full sync that finished a
+     * moment ago counts as recent enough.
      */
-    private fun requestSync(force: Boolean, userInitiated: Boolean = false): Job? {
+    private fun requestSync(force: Boolean, userInitiated: Boolean = false, full: Boolean = true): Job? {
         val repository = repository ?: return null
         if (accessRevoked) return null
         syncJob?.takeIf { it.isActive }?.let { running ->
-            if (force) syncAgain = true
+            if (force) {
+                syncAgain = true
+                if (full) syncAgainFull = true
+            }
             return running
         }
         if (!force && SystemClock.elapsedRealtime() - lastSyncFinished < RECENT_SYNC_MS) return null
         val job = viewModelScope.launch(accountWork) {
+            var nextFull = full
             do {
                 syncAgain = false
-                runSync(repository, userInitiated)
+                syncAgainFull = false
+                runSync(repository, userInitiated, nextFull)
+                nextFull = syncAgainFull
             } while (syncAgain)
         }
         syncJob = job
         return job
     }
 
-    private suspend fun runSync(repository: TaskRepository, userInitiated: Boolean) {
+    private suspend fun runSync(repository: TaskRepository, userInitiated: Boolean, full: Boolean) {
         val hadData = repository.snapshot.value.isSynced
         if (!hadData) _state.value = AppState.Loading
         _syncStatus.value = _syncStatus.value.copy(syncing = true)
         try {
-            val report = repository.sync()
-            lastSyncFinished = SystemClock.elapsedRealtime()
+            val report = repository.sync(full)
+            if (full) lastSyncFinished = SystemClock.elapsedRealtime()
             _syncStatus.value = SyncStatus()
             describe(report)?.let { _message.value = UiMessage(it, isError = false) }
         } catch (e: CancellationException) {
@@ -398,12 +431,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         updateHistoryState()
         // Until the first sync has finished there is nothing to show; the spinner or error screen stays.
         if (!snapshot.isSynced) return
-        val (completed, active) = TaskTree.build(snapshot.currentTasks, _completedOrder.value).partition { it.task.isCompleted }
-        _state.value = AppState.Tasks(snapshot.calendarName, active, completed, accessRevoked, snapshot.pendingChanges)
+        val list = selected(snapshot) ?: return
+        selectedHref = list.href
+        val (completed, active) = TaskTree.build(list.currentTasks, _completedOrder.value).partition { it.task.isCompleted }
+        val lists = snapshot.calendars.map { TaskList(it.href, it.name, it.color, it.pendingChanges) }
+        _state.value = AppState.Tasks(lists, list.href, active, completed, accessRevoked, snapshot.pendingChanges)
     }
 
     private fun updateHistoryState() {
-        _historyState.value = HistoryState(history.canUndo && !accessRevoked, history.canRedo && !accessRevoked)
+        val history = selectedHref?.let { histories[it] }
+        _historyState.value = HistoryState(history?.canUndo == true && !accessRevoked, history?.canRedo == true && !accessRevoked)
     }
 
     /**
@@ -433,8 +470,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         accessRevoked = false
         syncJob = null
         syncAgain = false
+        syncAgainFull = false
         lastSyncFinished = NEVER
-        history.clear()
+        histories.clear()
         updateHistoryState()
         _syncStatus.value = SyncStatus()
         _state.value = AppState.LoggedOut

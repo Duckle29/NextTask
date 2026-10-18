@@ -2,9 +2,7 @@ package cc.sche.apps.nexttask.sync
 
 import cc.sche.apps.nexttask.caldav.CalDavClient
 import cc.sche.apps.nexttask.caldav.ConflictException
-import cc.sche.apps.nexttask.caldav.DavException
 import cc.sche.apps.nexttask.caldav.SyncResult
-import cc.sche.apps.nexttask.caldav.TaskCalendar
 import cc.sche.apps.nexttask.model.Edit
 import cc.sche.apps.nexttask.model.Task
 import cc.sche.apps.nexttask.model.TaskChange
@@ -36,13 +34,13 @@ data class SyncReport(
 class NoTaskListException : Exception("No task list found on this account")
 
 /**
- * The local copy of an account's tasks, usable without a connection.
+ * The local copy of an account's task lists, usable without a connection.
  *
- * Reads and [edit]s never wait for the network: they act on [snapshot] immediately. [sync] later
- * brings the server and the device together: it pulls what changed on the server, merges it with edits
- * made meanwhile, and uploads those edits. Uploads are guarded by ETags, so nothing on the server is
- * overwritten blindly. If [sync] fails halfway (no connection), everything done so far is kept and the
- * rest happens on the next call.
+ * Reads and edits never wait for the network: they act on [snapshot] immediately. [sync] later brings the
+ * server and the device together, list by list: it pulls what changed on the server, merges it with edits made
+ * meanwhile, and uploads those edits. Uploads are guarded by ETags, so nothing on the server is overwritten
+ * blindly. If [sync] fails halfway (no connection), everything done so far is kept and the rest happens on the
+ * next call.
  *
  * Persisting [snapshot] is the caller's job: collect it and write each value to storage.
  */
@@ -56,29 +54,64 @@ class TaskRepository(
     private val syncLock = Mutex()
 
     /** Applies the user's new versions of existing tasks to the local copy. Syncing them is up to the caller. */
-    fun edit(changed: List<Task>) {
-        state.update { it.applyEdits(changed) }
+    fun edit(calendarHref: String, changed: List<Task>) {
+        update(calendarHref) { it.applyEdits(changed) }
     }
 
     /** Creates a task. It exists locally at once and reaches the server on the next sync. */
-    fun create(task: Task) = apply(Edit(listOf(TaskChange(before = null, after = task))))
+    fun create(calendarHref: String, task: Task) = apply(calendarHref, Edit(listOf(TaskChange(before = null, after = task))))
 
     /** Deletes the tasks with these UIDs. Until the next sync they are only hidden, so deleting can be undone. */
-    fun delete(uids: Collection<String>) {
-        val tasks = state.value.tasks
-        apply(Edit(uids.mapNotNull { tasks[it]?.takeUnless { stored -> stored.isDeleted }?.task }.map { TaskChange(before = it, after = null) }))
+    fun delete(calendarHref: String, uids: Collection<String>) {
+        val tasks = state.value.calendar(calendarHref)?.tasks ?: return
+        val changes = uids.mapNotNull { tasks[it]?.takeUnless { stored -> stored.isDeleted }?.task }
+            .map { TaskChange(before = it, after = null) }
+        apply(calendarHref, Edit(changes))
     }
 
-    /** Applies (or, for an [Edit.inverse], reverts) something the user did. */
-    fun apply(edit: Edit) {
-        state.update { it.applyChanges(edit.changes) }
+    /** Applies (or, for an [Edit.inverse], reverts) something the user did in a list. */
+    fun apply(calendarHref: String, edit: Edit) {
+        update(calendarHref) { it.applyChanges(edit.changes) }
     }
 
-    suspend fun sync(): SyncReport = syncLock.withLock {
+    /**
+     * Syncs with the server. A [full] sync first looks up the account's lists (they may have been added,
+     * renamed or removed) and then syncs every one; otherwise only lists with changes waiting are synced, which
+     * is what to do right after an edit.
+     */
+    suspend fun sync(full: Boolean = true): SyncReport = syncLock.withLock {
+        var report = SyncReport()
+        // Without any list known yet there is nothing to be lightweight about: find them and load them all.
+        val everything = full || !state.value.isSynced
+        if (everything) report += discoverLists()
+        val hrefs = state.value.calendars.filter { everything || it.pendingChanges > 0 }.map { it.href }
+        for (href in hrefs) report += syncList(href)
+        report
+    }
+
+    /** Brings the list of task lists up to date. Edits to a list that no longer exists are lost, and counted. */
+    private suspend fun discoverLists(): SyncReport {
+        val found = client.discoverTaskCalendars()
+        if (found.isEmpty()) throw NoTaskListException()
+        var dropped = 0
+        state.update { current ->
+            val known = current.calendars.associateBy { it.href }
+            dropped = current.calendars.filter { it.href !in found.map { f -> f.href } }.sumOf { it.pendingChanges }
+            current.copy(
+                calendars = found.map { f ->
+                    known[f.href]?.copy(name = f.displayName, color = f.color)
+                        ?: CalendarSnapshot(f.href, f.displayName, f.color)
+                },
+            )
+        }
+        return SyncReport(discardedEdits = dropped)
+    }
+
+    private suspend fun syncList(href: String): SyncReport {
         var report = SyncReport()
         repeat(MAX_ROUNDS) {
-            report += pull()
-            val upload = upload()
+            report += pull(href)
+            val upload = upload(href)
             report += SyncReport(uploaded = upload.uploaded)
             // Another client changed a task between our pull and upload: pull again and merge.
             if (!upload.conflicted) return report
@@ -86,10 +119,10 @@ class TaskRepository(
         throw ConflictException(PRECONDITION_FAILED)
     }
 
-    private suspend fun pull(): SyncReport {
-        val (result, fullListing) = fetchChanges()
+    private suspend fun pull(href: String): SyncReport {
+        val (result, fullListing) = fetchChanges(href)
         var outcome: PullOutcome? = null
-        state.update { current ->
+        update(href) { current ->
             current.applyPull(result, fullListing)
                 .also { outcome = it }
                 .snapshot.copy(syncToken = result.syncToken)
@@ -101,45 +134,32 @@ class TaskRepository(
         )
     }
 
-    /** The server's changes since the last sync, and whether they are the complete list rather than a delta. */
-    private suspend fun fetchChanges(): Pair<SyncResult, Boolean> {
-        val current = state.value
-        val href = current.calendarHref ?: return fromNewCalendar()
+    /** The server's changes to a list since the last sync, and whether they are the complete list rather than a delta. */
+    private suspend fun fetchChanges(href: String): Pair<SyncResult, Boolean> {
+        val token = state.value.calendar(href)?.syncToken
         return try {
-            try {
-                client.sync(href, current.syncToken) to (current.syncToken == null)
-            } catch (_: CalDavClient.SyncTokenInvalidException) {
-                client.sync(href, null) to true
-            }
-        } catch (e: DavException) {
-            // The list was deleted or moved: look for the account's task list again.
-            if (e.status == NOT_FOUND) fromNewCalendar() else throw e
+            client.sync(href, token) to (token == null)
+        } catch (_: CalDavClient.SyncTokenInvalidException) {
+            client.sync(href, null) to true
         }
-    }
-
-    private suspend fun fromNewCalendar(): Pair<SyncResult, Boolean> {
-        val calendar: TaskCalendar = client.discoverTaskCalendars().firstOrNull() ?: throw NoTaskListException()
-        state.update { it.copy(calendarHref = calendar.href, calendarName = calendar.displayName, syncToken = null) }
-        return client.sync(calendar.href, null) to true
     }
 
     private class UploadOutcome(val uploaded: Int, val conflicted: Boolean)
 
-    private suspend fun upload(): UploadOutcome {
-        state.update { it.withoutAbandonedTasks() }
-        val calendarHref = state.value.calendarHref ?: return UploadOutcome(0, false)
+    private suspend fun upload(href: String): UploadOutcome {
+        update(href) { it.withoutAbandonedTasks() }
         var uploaded = 0
         var conflicted = false
-        for (uid in state.value.tasks.filterValues { it.isDirty }.keys) {
+        for (uid in tasksOf(href).filterValues { it.isDirty }.keys) {
             // Look again: the user may have changed or undone things since this sync began.
-            val stored = state.value.tasks[uid]?.takeIf { it.isDirty } ?: continue
+            val stored = tasksOf(href)[uid]?.takeIf { it.isDirty } ?: continue
             try {
                 if (stored.isDeleted) {
                     client.delete(stored.href, stored.etag)
-                    state.update { it.applyDeletedOnServer(uid) }
+                    update(href) { it.applyDeletedOnServer(uid) }
                 } else {
-                    val result = client.put(calendarHref, stored.task, href = stored.href, etag = stored.etag)
-                    state.update { it.applyUploaded(uid, stored.task, result.etag) }
+                    val result = client.put(href, stored.task, href = stored.href, etag = stored.etag)
+                    update(href) { it.applyUploaded(uid, stored.task, result.etag) }
                 }
                 uploaded++
             } catch (_: ConflictException) {
@@ -149,9 +169,17 @@ class TaskRepository(
         return UploadOutcome(uploaded, conflicted)
     }
 
+    private fun tasksOf(href: String): Map<String, StoredTask> = state.value.calendar(href)?.tasks.orEmpty()
+
+    /** Changes one list; does nothing if it has disappeared in the meantime. */
+    private fun update(href: String, transform: (CalendarSnapshot) -> CalendarSnapshot) {
+        state.update { account ->
+            account.copy(calendars = account.calendars.map { if (it.href == href) transform(it) else it })
+        }
+    }
+
     private companion object {
         const val MAX_ROUNDS = 3
-        const val NOT_FOUND = 404
         const val PRECONDITION_FAILED = 412
     }
 }

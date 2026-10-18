@@ -31,6 +31,27 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
@@ -111,21 +132,37 @@ private fun App(viewModel: AppViewModel) {
     var showPreferences by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showPreferences) { showPreferences = false }
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    val banner: @Composable () -> Unit = {
         message?.let {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    it.text,
-                    color = if (it.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.weight(1f),
-                )
-                if (it.undoable) {
-                    TextButton(onClick = { viewModel.undo(); viewModel.dismissMessage() }) { Text("Undo") }
-                }
-                TextButton(onClick = viewModel::dismissMessage) { Text("Dismiss") }
-            }
+            MessageBanner(it, onUndo = { viewModel.undo(); viewModel.dismissMessage() }, onDismiss = viewModel::dismissMessage)
         }
-        when (val current = state) {
+    }
+    val current = state
+    if (current is AppState.Tasks && !showPreferences) {
+        TaskTreeScreen(
+            tasks = current,
+            banner = banner,
+            refreshing = refreshing,
+            syncStatus = syncStatus,
+            history = history,
+            onSelectList = viewModel::selectList,
+            onOpenPreferences = { showPreferences = true },
+            onUndo = viewModel::undo,
+            onRedo = viewModel::redo,
+            onSetCompleted = viewModel::setCompleted,
+            onAddTask = viewModel::addTask,
+            onDeleteTask = viewModel::deleteTask,
+            onExport = viewModel::exportTasks,
+            onRefresh = viewModel::refresh,
+            onSignOut = viewModel::signOut,
+            onSignInAgain = viewModel::signInAgain,
+        )
+        return
+    }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        banner()
+        when (current) {
             AppState.Loading -> Centered { CircularProgressIndicator() }
             AppState.LoggedOut -> LoginScreen(onSignIn = viewModel::signIn)
             is AppState.ConfirmHttps -> AlertDialog(
@@ -142,27 +179,25 @@ private fun App(viewModel: AppViewModel) {
                 Button(onClick = viewModel::refresh) { Text("Retry") }
                 TextButton(onClick = viewModel::signOut) { Text("Sign out") }
             }
-            is AppState.Tasks -> if (showPreferences) PreferencesScreen(
+            is AppState.Tasks -> PreferencesScreen(
                 completedOrder = completedOrder,
                 onCompletedOrderChange = viewModel::setCompletedOrder,
                 onBack = { showPreferences = false },
-            ) else TaskTreeScreen(
-                tasks = current,
-                refreshing = refreshing,
-                syncStatus = syncStatus,
-                history = history,
-                onOpenPreferences = { showPreferences = true },
-                onUndo = viewModel::undo,
-                onRedo = viewModel::redo,
-                onSetCompleted = viewModel::setCompleted,
-                onAddTask = viewModel::addTask,
-                onDeleteTask = viewModel::deleteTask,
-                onExport = viewModel::exportTasks,
-                onRefresh = viewModel::refresh,
-                onSignOut = viewModel::signOut,
-                onSignInAgain = viewModel::signInAgain,
             )
         }
+    }
+}
+
+@Composable
+private fun MessageBanner(message: UiMessage, onUndo: () -> Unit, onDismiss: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            message.text,
+            color = if (message.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        if (message.undoable) TextButton(onClick = onUndo) { Text("Undo") }
+        TextButton(onClick = onDismiss) { Text("Dismiss") }
     }
 }
 
@@ -332,9 +367,11 @@ private fun CompletedOrderOption(
 @Composable
 private fun TaskTreeScreen(
     tasks: AppState.Tasks,
+    banner: @Composable () -> Unit,
     refreshing: Boolean,
     syncStatus: SyncStatus,
     history: HistoryState,
+    onSelectList: (href: String) -> Unit,
     onOpenPreferences: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
@@ -403,90 +440,160 @@ private fun TaskTreeScreen(
     val pullState = rememberPullToRefreshState()
     val pullThresholdPx = with(LocalDensity.current) { PullToRefreshDefaults.PositionalThreshold.toPx() }
 
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Box {
-                var menuOpen by remember { mutableStateOf(false) }
-                IconButton(onClick = { menuOpen = true }) {
-                    Icon(Icons.Default.Menu, contentDescription = "Menu")
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
+    val closeThen = { action: () -> Unit -> scope.launch { drawerState.close() }; action() }
+
+    // Swiping right anywhere on the screen opens the drawer, swiping left closes it.
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ListsDrawer(
+                tasks = tasks,
+                onSelectList = { href -> closeThen { onSelectList(href) } },
+                onRefresh = { closeThen(onRefresh) },
+                onExport = { closeThen { exportLauncher.launch(exportFileName(tasks.calendarName)) } },
+                onOpenPreferences = { closeThen(onOpenPreferences) },
+                onSignOut = { closeThen { if (tasks.pendingChanges > 0) confirmSignOut = true else onSignOut() } },
+            )
+        },
+    ) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            banner()
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                    Icon(Icons.Default.Menu, contentDescription = "Lists and menu")
                 }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    if (!tasks.accessRevoked) {
-                        DropdownMenuItem(text = { Text("Refresh") }, onClick = { menuOpen = false; onRefresh() })
-                    }
-                    DropdownMenuItem(text = { Text("Preferences") }, onClick = { menuOpen = false; onOpenPreferences() })
-                    DropdownMenuItem(
-                        text = { Text("Export tasks…") },
-                        onClick = { menuOpen = false; exportLauncher.launch(exportFileName(tasks.calendarName)) },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Sign out") },
-                        onClick = {
-                            menuOpen = false
-                            if (tasks.pendingChanges > 0) confirmSignOut = true else onSignOut()
-                        },
-                    )
+                Text(tasks.calendarName, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                IconButton(onClick = onUndo, enabled = history.canUndo) {
+                    Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo")
+                }
+                IconButton(onClick = onRedo, enabled = history.canRedo) {
+                    Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo")
                 }
             }
-            Text(tasks.calendarName, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            IconButton(onClick = onUndo, enabled = history.canUndo) {
-                Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo")
-            }
-            IconButton(onClick = onRedo, enabled = history.canRedo) {
-                Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo")
-            }
-        }
-        if (tasks.accessRevoked) SignedOutBanner(onSignInAgain)
-        SyncStatusLine(tasks.pendingChanges, syncStatus)
-        PullToRefreshBox(
-            isRefreshing = refreshing,
-            onRefresh = onRefresh,
-            state = pullState,
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            LazyColumn(
-                // Let the list follow the finger like an overscroll, and ease back on release.
-                Modifier.fillMaxSize().graphicsLayer { translationY = pullState.distanceFraction * pullThresholdPx },
-                // Room below the last task, so the add button never covers it.
-                contentPadding = PaddingValues(bottom = 88.dp),
+            if (tasks.accessRevoked) SignedOutBanner(onSignInAgain)
+            SyncStatusLine(tasks.pendingChanges, syncStatus)
+            PullToRefreshBox(
+                isRefreshing = refreshing,
+                onRefresh = onRefresh,
+                state = pullState,
+                modifier = Modifier.fillMaxSize(),
             ) {
-                if (activeRows.isEmpty() && tasks.completed.isEmpty()) item { Text("No tasks.") }
-                items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onDelete) }
-                if (tasks.completed.isNotEmpty()) {
-                    item(key = "completed-header") {
-                        val count = tasks.completed.size
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clickable(role = Role.Button) { completedSectionOpen = !completedSectionOpen }
-                                .padding(top = 24.dp, bottom = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Box(Modifier.size(FOLD_TARGET_SIZE), contentAlignment = Alignment.Center) {
-                                FoldIcon(expanded = completedSectionOpen)
+                LazyColumn(
+                    // Let the list follow the finger like an overscroll, and ease back on release.
+                    Modifier.fillMaxSize().graphicsLayer { translationY = pullState.distanceFraction * pullThresholdPx },
+                    // Room below the last task, so the add button never covers it.
+                    contentPadding = PaddingValues(bottom = 88.dp),
+                ) {
+                    if (activeRows.isEmpty() && tasks.completed.isEmpty()) item { Text("No tasks.") }
+                    items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onDelete) }
+                    if (tasks.completed.isNotEmpty()) {
+                        item(key = "completed-header") {
+                            val count = tasks.completed.size
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable(role = Role.Button) { completedSectionOpen = !completedSectionOpen }
+                                    .padding(top = 24.dp, bottom = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(Modifier.size(FOLD_TARGET_SIZE), contentAlignment = Alignment.Center) {
+                                    FoldIcon(expanded = completedSectionOpen)
+                                }
+                                Text(
+                                    "$count Completed ${if (count == 1) "Task" else "Tasks"}",
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
                             }
-                            Text(
-                                "$count Completed ${if (count == 1) "Task" else "Tasks"}",
-                                style = MaterialTheme.typography.titleSmall,
-                            )
+                        }
+                        if (completedSectionOpen) {
+                            items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onDelete) }
                         }
                     }
-                    if (completedSectionOpen) {
-                        items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onDelete) }
-                    }
                 }
-            }
-            if (!tasks.accessRevoked) {
-                FloatingActionButton(
-                    onClick = { addParentUid = null; adding = true },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "Add task")
+                if (!tasks.accessRevoked) {
+                    FloatingActionButton(
+                        onClick = { addParentUid = null; adding = true },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Add task")
+                    }
                 }
             }
         }
     }
 }
+
+@Composable
+private fun ListsDrawer(
+    tasks: AppState.Tasks,
+    onSelectList: (href: String) -> Unit,
+    onRefresh: () -> Unit,
+    onExport: () -> Unit,
+    onOpenPreferences: () -> Unit,
+    onSignOut: () -> Unit,
+) {
+    ModalDrawerSheet(Modifier.fillMaxWidth(DRAWER_WIDTH_FRACTION)) {
+        Column(Modifier.fillMaxHeight().padding(vertical = 12.dp)) {
+            Text(
+                "Task lists",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 28.dp, vertical = 12.dp),
+            )
+            Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                tasks.lists.forEach { list ->
+                    NavigationDrawerItem(
+                        label = { Text(list.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        selected = list.href == tasks.selectedHref,
+                        onClick = { onSelectList(list.href) },
+                        icon = { ListColorDot(list.color) },
+                        badge = { if (list.pendingChanges > 0) Text(list.pendingChanges.toString()) },
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                }
+            }
+            HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
+            if (!tasks.accessRevoked) DrawerAction("Refresh", Icons.Default.Refresh, onRefresh)
+            DrawerAction("Export tasks…", Icons.Default.Download, onExport)
+            DrawerAction("Preferences", Icons.Default.Settings, onOpenPreferences)
+            DrawerAction("Sign out", Icons.AutoMirrored.Filled.Logout, onSignOut)
+        }
+    }
+}
+
+@Composable
+private fun DrawerAction(label: String, icon: ImageVector, onClick: () -> Unit) {
+    NavigationDrawerItem(
+        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        selected = false,
+        onClick = onClick,
+        icon = { Icon(icon, contentDescription = null) },
+        modifier = Modifier.padding(horizontal = 12.dp),
+    )
+}
+
+/** The list's own colour from the server, or the theme colour if it has none or it cannot be read. */
+@Composable
+private fun ListColorDot(color: String?) {
+    val parsed = remember(color) { color?.let(::parseServerColor) }
+    Box(Modifier.size(12.dp).clip(CircleShape).background(parsed ?: MaterialTheme.colorScheme.primary))
+}
+
+/**
+ * `#RRGGBB`, or `#RRGGBBAA` as many CalDAV clients write it (alpha last, unlike Android's `#AARRGGBB`).
+ * The transparency is ignored: a list's colour is always shown opaque.
+ */
+internal fun parseServerColor(value: String): Color? {
+    val hex = value.trim().removePrefix("#")
+    if (hex.length != 6 && hex.length != 8) return null
+    val rgb = hex.take(6).toIntOrNull(16) ?: return null
+    return Color(0xFF000000.toInt() or rgb)
+}
+
+private const val DRAWER_WIDTH_FRACTION = 0.72f
 
 @Composable
 private fun AddTaskDialog(parentName: String?, onAdd: (String) -> Unit, onDismiss: () -> Unit) {

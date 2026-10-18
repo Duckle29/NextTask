@@ -21,7 +21,7 @@ class TaskRepositoryCreateDeleteTest {
 
     private fun repository() = TaskRepository(server.client(), AccountSnapshot(server.credentials.serverUrl, server.credentials.loginName))
 
-    private fun TaskRepository.visible() = snapshot.value.currentTasks.map { it.uid }.toSet()
+    private fun TaskRepository.visible() = snapshot.value.only().currentTasks.map { it.uid }.toSet()
 
     @Test
     fun aTaskCreatedOfflineIsUploadedLaterWithItsParent() = runTest {
@@ -30,7 +30,7 @@ class TaskRepositoryCreateDeleteTest {
         repo.sync()
 
         server.offline = true
-        repo.create(Task.create("child", "Buy milk", parentUid = "parent", now = now))
+        repo.create(server.calendarHref, Task.create("child", "Buy milk", parentUid = "parent", now = now))
         assertEquals(setOf("parent", "child"), repo.visible())
         assertFailsWith<RuntimeException> { repo.sync() }
         assertFalse(server.hasTask("child"))
@@ -44,7 +44,7 @@ class TaskRepositoryCreateDeleteTest {
         assertEquals("Buy milk", onServer.summary)
         assertEquals("parent", onServer.parentUid)
         assertEquals(0, repo.snapshot.value.pendingChanges)
-        assertFalse(repo.snapshot.value.tasks.getValue("child").isNew)
+        assertFalse(repo.snapshot.value.only().tasks.getValue("child").isNew)
     }
 
     @Test
@@ -52,8 +52,8 @@ class TaskRepositoryCreateDeleteTest {
         val repo = repository().also { it.sync() }
         val created = Task.create("a", "Draft", parentUid = null, now = now)
 
-        repo.create(created)
-        repo.edit(listOf(created.copy(summary = "Final")))
+        repo.create(server.calendarHref, created)
+        repo.edit(server.calendarHref, listOf(created.copy(summary = "Final")))
         repo.sync()
 
         assertEquals("Final", server.task("a")?.summary)
@@ -67,7 +67,7 @@ class TaskRepositoryCreateDeleteTest {
         repo.sync()
 
         server.offline = true
-        repo.delete(listOf("a"))
+        repo.delete(server.calendarHref, listOf("a"))
         assertEquals(setOf("b"), repo.visible())
         assertFailsWith<RuntimeException> { repo.sync() }
         assertTrue(server.hasTask("a"))
@@ -77,7 +77,7 @@ class TaskRepositoryCreateDeleteTest {
 
         assertFalse(server.hasTask("a"))
         assertTrue(server.hasTask("b"))
-        assertEquals(setOf("b"), repo.snapshot.value.tasks.keys)
+        assertEquals(setOf("b"), repo.snapshot.value.only().tasks.keys)
         assertEquals(0, repo.snapshot.value.pendingChanges)
     }
 
@@ -90,7 +90,7 @@ class TaskRepositoryCreateDeleteTest {
         val repo = repository()
         repo.sync()
 
-        repo.delete(TaskTree.subtreeUids(repo.snapshot.value.currentTasks, "p"))
+        repo.delete(server.calendarHref, TaskTree.subtreeUids(repo.snapshot.value.only().currentTasks, "p"))
         repo.sync()
 
         assertEquals(setOf("other"), server.run { listOf("p", "c", "g", "other").filter { hasTask(it) }.toSet() })
@@ -101,13 +101,13 @@ class TaskRepositoryCreateDeleteTest {
     fun aTaskCreatedAndDeletedOfflineNeverTouchesTheServer() = runTest {
         val repo = repository().also { it.sync() }
 
-        repo.create(task("a"))
-        repo.delete(listOf("a"))
+        repo.create(server.calendarHref, task("a"))
+        repo.delete(server.calendarHref, listOf("a"))
         val report = repo.sync()
 
         assertEquals(0, report.uploaded)
         assertFalse(server.hasTask("a"))
-        assertTrue(repo.snapshot.value.tasks.isEmpty())
+        assertTrue(repo.snapshot.value.only().tasks.isEmpty())
     }
 
     @Test
@@ -116,7 +116,7 @@ class TaskRepositoryCreateDeleteTest {
         val repo = repository()
         repo.sync()
 
-        repo.delete(listOf("a"))
+        repo.delete(server.calendarHref, listOf("a"))
         server.write(task("a", "Edited by someone else"))
         val report = repo.sync()
 
@@ -132,13 +132,13 @@ class TaskRepositoryCreateDeleteTest {
         val repo = repository()
         repo.sync()
 
-        repo.delete(listOf("a"))
+        repo.delete(server.calendarHref, listOf("a"))
         server.delete("a")
         val report = repo.sync()
 
         assertEquals(0, report.restoredDeletions)
         assertEquals(0, report.discardedEdits)
-        assertTrue(repo.snapshot.value.tasks.isEmpty())
+        assertTrue(repo.snapshot.value.only().tasks.isEmpty())
     }
 
     @Test
@@ -146,11 +146,11 @@ class TaskRepositoryCreateDeleteTest {
         server.write(task("a"))
         val repo = repository()
         repo.sync()
-        val original = repo.snapshot.value.tasks.getValue("a").task
+        val original = repo.snapshot.value.only().tasks.getValue("a").task
         val deletion = Edit(listOf(TaskChange(original, null)))
 
-        repo.apply(deletion)
-        repo.apply(deletion.inverse())
+        repo.apply(server.calendarHref, deletion)
+        repo.apply(server.calendarHref, deletion.inverse())
         val report = repo.sync()
 
         assertEquals(0, report.uploaded)
@@ -163,13 +163,13 @@ class TaskRepositoryCreateDeleteTest {
         server.write(task("a", "Keep me"))
         val repo = repository()
         repo.sync()
-        val original = repo.snapshot.value.tasks.getValue("a").task
+        val original = repo.snapshot.value.only().tasks.getValue("a").task
         val deletion = Edit(listOf(TaskChange(original, null)))
 
-        repo.apply(deletion)
+        repo.apply(server.calendarHref, deletion)
         repo.sync()
         assertFalse(server.hasTask("a"))
-        repo.apply(deletion.inverse())
+        repo.apply(server.calendarHref, deletion.inverse())
         repo.sync()
 
         assertEquals("Keep me", server.task("a")?.summary)
@@ -183,14 +183,14 @@ class TaskRepositoryCreateDeleteTest {
         val created = Task.create("a", "Oops", parentUid = null, now = now)
         val creation = Edit(listOf(TaskChange(null, created)))
 
-        repo.apply(creation)
+        repo.apply(server.calendarHref, creation)
         repo.sync()
         assertTrue(server.hasTask("a"))
-        repo.apply(creation.inverse())
+        repo.apply(server.calendarHref, creation.inverse())
         repo.sync()
 
         assertFalse(server.hasTask("a"))
-        assertTrue(repo.snapshot.value.tasks.isEmpty())
+        assertTrue(repo.snapshot.value.only().tasks.isEmpty())
     }
 
     @Test
@@ -198,7 +198,7 @@ class TaskRepositoryCreateDeleteTest {
         val repo = repository().also { it.sync() }
         val created = Task.create("a", "Once", parentUid = null, now = now)
 
-        repo.create(created)
+        repo.create(server.calendarHref, created)
         // The first upload reached the server, but the app never heard back.
         server.write(created)
         val report = repo.sync()
@@ -217,7 +217,7 @@ class TaskRepositoryCreateDeleteTest {
         repo.sync()
 
         server.offline = true
-        repo.create(task("local"))
+        repo.create(server.calendarHref, task("local"))
         assertFailsWith<RuntimeException> { repo.sync() }
         server.offline = false
         server.oldestValidToken = 1_000 // the stored sync token is no longer accepted
@@ -234,8 +234,8 @@ class TaskRepositoryCreateDeleteTest {
         val repo = repository()
         repo.sync()
 
-        repo.delete(listOf("a"))
+        repo.delete(server.calendarHref, listOf("a"))
 
-        assertEquals(listOf("b"), repo.snapshot.value.currentTasks.map { it.uid })
+        assertEquals(listOf("b"), repo.snapshot.value.only().currentTasks.map { it.uid })
     }
 }

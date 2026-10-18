@@ -17,15 +17,14 @@ class SnapshotUpdatesTest {
 
     private fun task(uid: String, summary: String = uid) = Task(uid = uid, summary = summary)
 
-    private fun synced(vararg tasks: Task) = AccountSnapshot(
-        serverUrl = "s",
-        loginName = "u",
-        calendarHref = calendar,
+    private fun synced(vararg tasks: Task) = CalendarSnapshot(
+        href = calendar,
+        name = "Tasks",
         tasks = tasks.associate { it.uid to StoredTask("$calendar${it.uid}.ics", "\"${it.uid}-1\"", it) },
     )
 
-    private fun created(snapshot: AccountSnapshot, task: Task) = snapshot.applyChanges(listOf(TaskChange(null, task)))
-    private fun deleted(snapshot: AccountSnapshot, task: Task) = snapshot.applyChanges(listOf(TaskChange(task, null)))
+    private fun created(snapshot: CalendarSnapshot, task: Task) = snapshot.applyChanges(listOf(TaskChange(null, task)))
+    private fun deleted(snapshot: CalendarSnapshot, task: Task) = snapshot.applyChanges(listOf(TaskChange(task, null)))
 
     private fun result(vararg changed: Task, deleted: List<String> = emptyList()) = SyncResult(
         syncToken = "t",
@@ -46,12 +45,6 @@ class SnapshotUpdatesTest {
         assertEquals("/cal/a%20b.ics", stored.href)
         assertEquals(1, snapshot.pendingChanges)
         assertEquals(listOf(task("a b")), snapshot.currentTasks)
-    }
-
-    @Test
-    fun nothingCanBeCreatedBeforeTheCalendarIsKnown() {
-        val empty = AccountSnapshot("s", "u")
-        assertEquals(empty, created(empty, task("a")))
     }
 
     @Test

@@ -16,7 +16,15 @@ class PreferencesStore(context: Context) {
             prefs.edit().putString(KEY_COMPLETED_ORDER, value.name).apply()
         }
 
+    /** The task list the user was looking at; the first list is used when this is unset or no longer exists. */
+    var selectedList: String?
+        get() = prefs.getString(KEY_SELECTED_LIST, null)
+        set(value) {
+            prefs.edit().putString(KEY_SELECTED_LIST, value).apply()
+        }
+
     private companion object {
         const val KEY_COMPLETED_ORDER = "completed_order"
+        const val KEY_SELECTED_LIST = "selected_list"
     }
 }

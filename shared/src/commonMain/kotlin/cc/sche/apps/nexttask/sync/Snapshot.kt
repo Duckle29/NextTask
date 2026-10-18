@@ -31,34 +31,48 @@ data class StoredTask(
     val isDirty: Boolean get() = if (isDeleted) !isNew else isNew || base != null
 }
 
-/** Everything the app knows about one account's task list; this is what is persisted on the device. */
+/** Everything the app knows about one task list of the account. */
 @Serializable
-data class AccountSnapshot(
-    val serverUrl: String,
-    val loginName: String,
-    /** Null until the first successful discovery of the task calendar. */
-    val calendarHref: String? = null,
-    val calendarName: String = "",
+data class CalendarSnapshot(
+    /** Where the list lives on the server; identifies it. */
+    val href: String,
+    val name: String,
+    /** The list's colour as the server reports it (e.g. `#0082c9`), if any. */
+    val color: String? = null,
     val syncToken: String? = null,
-    /** All tasks of the calendar by UID, including deleted ones that the server has not been told about. */
+    /** All tasks of the list by UID, including deleted ones that the server has not been told about. */
     val tasks: Map<String, StoredTask> = emptyMap(),
-    /** Bump when the stored format changes incompatibly; older snapshots are then discarded and re-synced. */
-    val schemaVersion: Int = SCHEMA_VERSION,
 ) {
-    /** False until the first sync has completed, i.e. while there is nothing to show yet. */
-    val isSynced: Boolean get() = calendarHref != null
-
     /** Number of tasks with changes (edits, creations, deletions) the server has not received yet. */
     val pendingChanges: Int get() = tasks.values.count { it.isDirty }
 
     /** The tasks the user sees: everything that is not deleted. */
     val currentTasks: List<Task> get() = tasks.values.filterNot { it.isDeleted }.map { it.task }
+}
+
+/** Everything the app knows about one account: its task lists with their tasks. This is what is persisted. */
+@Serializable
+data class AccountSnapshot(
+    val serverUrl: String,
+    val loginName: String,
+    /** In the order the server lists them. Empty until the first sync has found them. */
+    val calendars: List<CalendarSnapshot> = emptyList(),
+    /** Bump when the stored format changes incompatibly; older snapshots are then discarded and re-synced. */
+    val schemaVersion: Int = SCHEMA_VERSION,
+) {
+    /** False until the first sync has completed, i.e. while there is nothing to show yet. */
+    val isSynced: Boolean get() = calendars.isNotEmpty()
+
+    /** Number of changes over all lists that the server has not received yet. */
+    val pendingChanges: Int get() = calendars.sumOf { it.pendingChanges }
+
+    fun calendar(href: String?): CalendarSnapshot? = calendars.firstOrNull { it.href == href }
 
     /** True if this snapshot belongs to the account [serverUrl]/[loginName] and can be read by this version. */
     fun belongsTo(serverUrl: String, loginName: String): Boolean =
         this.serverUrl == serverUrl && this.loginName == loginName && schemaVersion == SCHEMA_VERSION
 
     companion object {
-        const val SCHEMA_VERSION = 1
+        const val SCHEMA_VERSION = 2
     }
 }

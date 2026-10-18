@@ -25,7 +25,7 @@ class TaskRepositoryTest {
     private fun repository(initial: AccountSnapshot = AccountSnapshot(server.credentials.serverUrl, server.credentials.loginName)) =
         TaskRepository(client, initial)
 
-    private fun TaskRepository.local(uid: String) = snapshot.value.tasks[uid]?.task
+    private fun TaskRepository.local(uid: String) = snapshot.value.only().tasks[uid]?.task
 
     @Test
     fun firstSyncLoadsEverythingAndRemembersTheCalendar() = runTest {
@@ -37,10 +37,10 @@ class TaskRepositoryTest {
 
         val snapshot = repo.snapshot.value
         assertTrue(snapshot.isSynced)
-        assertEquals("Tasks", snapshot.calendarName)
-        assertEquals(setOf("a", "b"), snapshot.tasks.keys)
+        assertEquals("Tasks", snapshot.only().name)
+        assertEquals(setOf("a", "b"), snapshot.only().tasks.keys)
         assertEquals("a", repo.local("b")?.parentUid)
-        assertNotNull(snapshot.syncToken)
+        assertNotNull(snapshot.only().syncToken)
         assertEquals(0, snapshot.pendingChanges)
     }
 
@@ -51,7 +51,7 @@ class TaskRepositoryTest {
         repo.sync()
 
         server.offline = true
-        repo.edit(listOf(done(task("a"))))
+        repo.edit(server.calendarHref, listOf(done(task("a"))))
         assertFailsWith<RuntimeException> { repo.sync() }
 
         assertEquals(TaskStatus.Completed, repo.local("a")?.status)
@@ -71,7 +71,7 @@ class TaskRepositoryTest {
         server.write(task("a"))
         val first = repository()
         first.sync()
-        first.edit(listOf(done(task("a"))))
+        first.edit(server.calendarHref, listOf(done(task("a"))))
 
         // "Restart": a new repository from what was saved before the app died.
         val second = repository(first.snapshot.value)
@@ -79,7 +79,7 @@ class TaskRepositoryTest {
         val report = second.sync()
 
         assertEquals(1, report.uploaded)
-        assertEquals(setOf("a", "b"), second.snapshot.value.tasks.keys)
+        assertEquals(setOf("a", "b"), second.snapshot.value.only().tasks.keys)
         assertEquals(TaskStatus.Completed, server.task("a")?.status)
     }
 
@@ -89,7 +89,7 @@ class TaskRepositoryTest {
         val repo = repository()
         repo.sync()
 
-        repo.edit(listOf(done(task("a", "Old"))))
+        repo.edit(server.calendarHref, listOf(done(task("a", "Old"))))
         server.write(task("a", "Renamed on the server"))
         val report = repo.sync()
 
@@ -109,7 +109,7 @@ class TaskRepositoryTest {
         repo.sync()
 
         server.offline = true
-        repo.edit(listOf(done(task("a"))))
+        repo.edit(server.calendarHref, listOf(done(task("a"))))
         server.offline = false
         server.write(task("b", "Renamed"))
         repo.sync()
@@ -125,13 +125,13 @@ class TaskRepositoryTest {
         val repo = repository()
         repo.sync()
 
-        repo.edit(listOf(done(task("a"))))
+        repo.edit(server.calendarHref, listOf(done(task("a"))))
         server.delete("a")
         server.delete("b")
         val report = repo.sync()
 
         assertEquals(1, report.discardedEdits)
-        assertTrue(repo.snapshot.value.tasks.isEmpty())
+        assertTrue(repo.snapshot.value.only().tasks.isEmpty())
         assertFalse(server.hasTask("a"))
     }
 
@@ -141,7 +141,7 @@ class TaskRepositoryTest {
         val repo = repository()
         repo.sync()
 
-        repo.edit(listOf(done(task("a", "Old"))))
+        repo.edit(server.calendarHref, listOf(done(task("a", "Old"))))
         server.beforePut = { server.write(task("a", "Changed at the worst moment")) }
         val report = repo.sync()
 
@@ -165,7 +165,7 @@ class TaskRepositoryTest {
 
         repo.sync()
 
-        assertEquals(setOf("a", "c"), repo.snapshot.value.tasks.keys)
+        assertEquals(setOf("a", "c"), repo.snapshot.value.only().tasks.keys)
     }
 
     @Test
@@ -188,9 +188,9 @@ class TaskRepositoryTest {
         repo.sync()
         val original = repo.local("a")!!
 
-        repo.edit(listOf(done(original)))
+        repo.edit(server.calendarHref, listOf(done(original)))
         assertEquals(1, repo.snapshot.value.pendingChanges)
-        repo.edit(listOf(original))
+        repo.edit(server.calendarHref, listOf(original))
 
         assertEquals(0, repo.snapshot.value.pendingChanges)
     }
@@ -198,7 +198,7 @@ class TaskRepositoryTest {
     @Test
     fun editsMadeDuringAnUploadStayPending() {
         val a = task("a")
-        val snapshot = AccountSnapshot("s", "u", tasks = mapOf("a" to StoredTask("/a.ics", "\"1\"", a))).applyEdits(listOf(done(a)))
+        val snapshot = CalendarSnapshot("/cal/", "Tasks", tasks = mapOf("a" to StoredTask("/a.ics", "\"1\"", a))).applyEdits(listOf(done(a)))
         val uploaded = snapshot.tasks.getValue("a").task
 
         val editedAgain = snapshot.applyEdits(listOf(uploaded.copy(summary = "Edited meanwhile")))
@@ -213,7 +213,7 @@ class TaskRepositoryTest {
 
     @Test
     fun editsToUnknownTasksAreIgnored() {
-        val snapshot = AccountSnapshot("s", "u")
+        val snapshot = CalendarSnapshot("/cal/", "Tasks")
         assertEquals(snapshot, snapshot.applyEdits(listOf(task("ghost"))))
         assertNull(snapshot.tasks["ghost"])
     }

@@ -7,7 +7,7 @@ import cc.sche.apps.nexttask.model.TaskChange
 
 /** What a pull did to changes the server had not seen yet, for reporting to the user. */
 internal data class PullOutcome(
-    val snapshot: AccountSnapshot,
+    val snapshot: CalendarSnapshot,
     /** Edits that were combined with a newer server version of the same task. */
     val mergedEdits: Int,
     /** Edits dropped because the task no longer exists on the server. */
@@ -26,7 +26,7 @@ internal data class PullOutcome(
  * With [fullListing] the result is the complete calendar rather than a delta, so every task missing from
  * it has been deleted.
  */
-internal fun AccountSnapshot.applyPull(result: SyncResult, fullListing: Boolean): PullOutcome {
+internal fun CalendarSnapshot.applyPull(result: SyncResult, fullListing: Boolean): PullOutcome {
     val tasks = tasks.toMutableMap()
     var merged = 0
     var discarded = 0
@@ -78,14 +78,14 @@ internal fun AccountSnapshot.applyPull(result: SyncResult, fullListing: Boolean)
 }
 
 /** Records the user's new versions of existing tasks. Tasks that are not in the list (any more) are ignored. */
-internal fun AccountSnapshot.applyEdits(changed: List<Task>): AccountSnapshot =
+internal fun CalendarSnapshot.applyEdits(changed: List<Task>): CalendarSnapshot =
     changed.fold(this) { snapshot, task -> snapshot.updated(task) }
 
 /**
  * Records what the user did: creations, deletions and edits. Applying the reverse of a change
  * ([cc.sche.apps.nexttask.model.Edit.inverse]) undoes it, including bringing a deleted task back.
  */
-internal fun AccountSnapshot.applyChanges(changes: List<TaskChange>): AccountSnapshot =
+internal fun CalendarSnapshot.applyChanges(changes: List<TaskChange>): CalendarSnapshot =
     changes.fold(this) { snapshot, change ->
         val before = change.before
         val after = change.after
@@ -96,7 +96,7 @@ internal fun AccountSnapshot.applyChanges(changes: List<TaskChange>): AccountSna
         }
     }
 
-private fun AccountSnapshot.updated(task: Task): AccountSnapshot {
+private fun CalendarSnapshot.updated(task: Task): CalendarSnapshot {
     val stored = tasks[task.uid]?.takeUnless { it.isDeleted } ?: return this
     return copy(tasks = tasks + (task.uid to stored.edited(task)))
 }
@@ -108,24 +108,22 @@ private fun StoredTask.edited(newTask: Task): StoredTask {
     return copy(task = newTask, base = serverCopy.takeUnless { it == newTask })
 }
 
-private fun AccountSnapshot.created(task: Task): AccountSnapshot {
+private fun CalendarSnapshot.created(task: Task): CalendarSnapshot {
     val stored = tasks[task.uid]
     return when {
         // Bringing back a task deleted earlier, which the server may not have been told about yet.
         stored != null -> copy(tasks = tasks + (task.uid to stored.copy(isDeleted = false).edited(task)))
-        // A brand new task needs a calendar to live in.
-        calendarHref == null -> this
-        else -> copy(tasks = tasks + (task.uid to StoredTask(taskHref(calendarHref, task.uid), etag = null, task = task, isNew = true)))
+        else -> copy(tasks = tasks + (task.uid to StoredTask(taskHref(href, task.uid), etag = null, task = task, isNew = true)))
     }
 }
 
-private fun AccountSnapshot.deleted(uid: String): AccountSnapshot {
+private fun CalendarSnapshot.deleted(uid: String): CalendarSnapshot {
     val stored = tasks[uid] ?: return this
     return copy(tasks = tasks + (uid to stored.copy(isDeleted = true)))
 }
 
 /** Drops tombstones of tasks that were created and deleted before they ever reached the server. */
-internal fun AccountSnapshot.withoutAbandonedTasks(): AccountSnapshot =
+internal fun CalendarSnapshot.withoutAbandonedTasks(): CalendarSnapshot =
     copy(tasks = tasks.filterNot { it.value.isDeleted && it.value.isNew })
 
 /**
@@ -133,7 +131,7 @@ internal fun AccountSnapshot.withoutAbandonedTasks(): AccountSnapshot =
  * was in flight, those newer edits stay pending, now relative to what was uploaded; if they deleted it,
  * the deletion is still pending and now has a server copy to delete.
  */
-internal fun AccountSnapshot.applyUploaded(uid: String, uploaded: Task, etag: String?): AccountSnapshot {
+internal fun CalendarSnapshot.applyUploaded(uid: String, uploaded: Task, etag: String?): CalendarSnapshot {
     val stored = tasks[uid] ?: return this
     val updated = when {
         stored.isDeleted -> stored.copy(etag = etag, isNew = false)
@@ -147,7 +145,7 @@ internal fun AccountSnapshot.applyUploaded(uid: String, uploaded: Task, etag: St
  * Records that the server deleted the task. If the user brought it back in the meantime, it has to be
  * created again, as the server no longer has it.
  */
-internal fun AccountSnapshot.applyDeletedOnServer(uid: String): AccountSnapshot {
+internal fun CalendarSnapshot.applyDeletedOnServer(uid: String): CalendarSnapshot {
     val stored = tasks[uid] ?: return this
     if (stored.isDeleted) return copy(tasks = tasks - uid)
     return copy(tasks = tasks + (uid to stored.copy(etag = null, base = null, isNew = true)))
