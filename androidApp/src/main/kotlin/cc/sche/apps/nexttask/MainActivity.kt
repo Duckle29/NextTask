@@ -307,6 +307,11 @@ private fun PreferencesScreen(
     onCompletedOrderChange: (CompletedOrder) -> Unit,
     onBack: () -> Unit,
 ) {
+    var showLicenses by rememberSaveable { mutableStateOf(false) }
+    if (showLicenses) {
+        LicensesScreen(onBack = { showLicenses = false })
+        return
+    }
     Column(Modifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
@@ -341,6 +346,24 @@ private fun PreferencesScreen(
             completedOrder,
             onCompletedOrderChange,
         )
+        Text(
+            "About",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(top = 24.dp, bottom = 8.dp),
+        )
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clickable(role = Role.Button) { showLicenses = true }
+                .padding(vertical = 8.dp),
+        ) {
+            Text("Open source licenses")
+            Text(
+                "NextTask ${BuildConfig.VERSION_NAME} · BSD 3-Clause License",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

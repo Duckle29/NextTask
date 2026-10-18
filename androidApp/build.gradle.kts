@@ -1,6 +1,8 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    // Lists the libraries in the app with their licenses, for the "Open source licenses" screen.
+    alias(libs.plugins.aboutlibraries.android)
 }
 
 // The version is not kept in the repository: a release build gets it from the git tag
@@ -47,6 +49,8 @@ android {
 
     buildFeatures {
         compose = true
+        // For the version shown under Preferences → About.
+        buildConfig = true
     }
 }
 
@@ -60,6 +64,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.ktor.client.okhttp)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.aboutlibraries.compose.m3)
 
     testImplementation(libs.junit)
 }
