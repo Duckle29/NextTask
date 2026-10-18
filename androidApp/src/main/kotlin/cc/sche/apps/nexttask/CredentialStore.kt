@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import cc.sche.apps.nexttask.auth.Credentials
+import kotlinx.serialization.json.Json
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -22,15 +23,15 @@ class CredentialStore(context: Context) {
             val blob = Base64.decode(encoded, Base64.NO_WRAP)
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(TAG_BITS, blob, 0, IV_BYTES))
-            val fields = cipher.doFinal(blob, IV_BYTES, blob.size - IV_BYTES).decodeToString().split('\n')
-            Credentials(serverUrl = fields[0], loginName = fields[1], appPassword = fields[2])
-        }.getOrNull() // An unreadable blob (e.g. key lost after restore) is treated as logged out.
+            val plain = cipher.doFinal(blob, IV_BYTES, blob.size - IV_BYTES).decodeToString()
+            Json.decodeFromString(Credentials.serializer(), plain)
+        }.getOrNull() // An unreadable blob (e.g. key lost, or an older format) is treated as logged out.
     }
 
     fun save(credentials: Credentials) {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
-        val plain = listOf(credentials.serverUrl, credentials.loginName, credentials.appPassword).joinToString("\n")
+        val plain = Json.encodeToString(Credentials.serializer(), credentials)
         val blob = cipher.iv + cipher.doFinal(plain.encodeToByteArray())
         prefs.edit().putString(KEY_BLOB, Base64.encodeToString(blob, Base64.NO_WRAP)).apply()
     }

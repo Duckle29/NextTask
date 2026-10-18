@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+. The credentials are encrypted with a Keystore key that never leaves the device,
+     so a backed-up copy could not be decrypted anyway; keep it out of backups and transfers. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="credentials.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="credentials.xml" />
+    </device-transfer>
+</data-extraction-rules>
