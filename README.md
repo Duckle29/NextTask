@@ -23,3 +23,7 @@ The iOS targets only build on macOS.
 
 Pushing a version tag from `main` (`git tag -a v1.2.3 -m "..." && git push origin v1.2.3`) builds, signs and
 publishes a release. See [docs/releasing.md](docs/releasing.md) for the one-time setup.
+
+## License
+
+[BSD 3-Clause](LICENSE).
