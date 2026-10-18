@@ -5,14 +5,38 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.RadioButton
+import androidx.compose.ui.semantics.Role
+import cc.mikkel.nexttask.tree.CompletedOrder
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
@@ -53,6 +77,11 @@ class MainActivity : ComponentActivity() {
 private fun App(viewModel: AppViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val error by viewModel.error.collectAsState()
+    val refreshing by viewModel.refreshing.collectAsState()
+    val history by viewModel.historyState.collectAsState()
+    val completedOrder by viewModel.completedOrder.collectAsState()
+    var showPreferences by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = showPreferences) { showPreferences = false }
     val context = LocalContext.current
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -77,8 +106,17 @@ private fun App(viewModel: AppViewModel = viewModel()) {
                 Button(onClick = viewModel::refresh) { Text("Retry") }
                 TextButton(onClick = viewModel::signOut) { Text("Sign out") }
             }
-            is AppState.Tasks -> TaskTreeScreen(
+            is AppState.Tasks -> if (showPreferences) PreferencesScreen(
+                completedOrder = completedOrder,
+                onCompletedOrderChange = viewModel::setCompletedOrder,
+                onBack = { showPreferences = false },
+            ) else TaskTreeScreen(
                 tasks = current,
+                refreshing = refreshing,
+                history = history,
+                onOpenPreferences = { showPreferences = true },
+                onUndo = viewModel::undo,
+                onRedo = viewModel::redo,
                 onSetCompleted = viewModel::setCompleted,
                 onRefresh = viewModel::refresh,
                 onSignOut = viewModel::signOut,
@@ -96,26 +134,142 @@ private fun Centered(content: @Composable () -> Unit) {
     ) { content() }
 }
 
+private enum class Scheme(val label: String, val prefix: String) {
+    Https("https://", "https://"),
+    Http("http://", "http://"),
+    /** The user types the full address, scheme included (or relies on the https default). */
+    None("none", ""),
+}
+
 @Composable
 private fun LoginScreen(onSignIn: (String) -> Unit) {
-    var server by rememberSaveable { mutableStateOf("") }
+    var scheme by rememberSaveable { mutableStateOf(Scheme.Https) }
+    var address by rememberSaveable { mutableStateOf("") }
+
+    // Pasted full URLs pick the matching scheme; spaces never belong in an address.
+    fun onAddressChange(input: String) {
+        val cleaned = input.filterNot { it.isWhitespace() }
+        when {
+            cleaned.startsWith("https://", ignoreCase = true) -> { scheme = Scheme.Https; address = cleaned.drop("https://".length) }
+            cleaned.startsWith("http://", ignoreCase = true) -> { scheme = Scheme.Http; address = cleaned.drop("http://".length) }
+            else -> address = cleaned
+        }
+    }
+
+    val signIn = { if (address.isNotEmpty()) onSignIn(scheme.prefix + address) }
+
     Centered {
         Text("Sign in to Nextcloud", style = MaterialTheme.typography.headlineSmall)
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            Scheme.entries.forEachIndexed { index, option ->
+                SegmentedButton(
+                    selected = scheme == option,
+                    onClick = { scheme = option },
+                    shape = SegmentedButtonDefaults.itemShape(index, Scheme.entries.size),
+                ) { Text(option.label) }
+            }
+        }
         OutlinedTextField(
-            value = server,
-            onValueChange = { server = it },
+            value = address,
+            onValueChange = ::onAddressChange,
             label = { Text("Server address") },
             placeholder = { Text("cloud.example.com") },
+            prefix = if (scheme.prefix.isEmpty()) null else ({ Text(scheme.prefix) }),
             singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrectEnabled = false,
+                keyboardType = KeyboardType.Uri,
+                imeAction = ImeAction.Go,
+            ),
+            keyboardActions = KeyboardActions(onGo = { signIn() }),
             modifier = Modifier.fillMaxWidth(),
         )
-        Button(onClick = { onSignIn(server) }, enabled = server.isNotBlank()) { Text("Sign in with browser") }
+        if (scheme == Scheme.Http) {
+            Text(
+                "Unencrypted connection: your login and tasks are sent in plain text.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        Button(onClick = { signIn() }, enabled = address.isNotEmpty()) { Text("Sign in with browser") }
+    }
+}
+
+@Composable
+private fun PreferencesScreen(
+    completedOrder: CompletedOrder,
+    onCompletedOrderChange: (CompletedOrder) -> Unit,
+    onBack: () -> Unit,
+) {
+    Column(Modifier.fillMaxSize()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+            Text("Preferences", style = MaterialTheme.typography.titleLarge)
+        }
+        Text(
+            "Completed task ordering",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
+        )
+        CompletedOrderOption(CompletedOrder.Off, "Off", "Nothing moves. Completed tasks stay where they are.", completedOrder, onCompletedOrderChange)
+        CompletedOrderOption(
+            CompletedOrder.CompletedListOnly,
+            "Only in the completed tasks list",
+            "Last completed on top in the completed list. Subtasks stay in place.",
+            completedOrder,
+            onCompletedOrderChange,
+        )
+        CompletedOrderOption(
+            CompletedOrder.CompletedSubtasksLast,
+            "Completed subtasks last",
+            "As above, and completed subtasks sink below the open ones, as in the Nextcloud web app.",
+            completedOrder,
+            onCompletedOrderChange,
+        )
+        CompletedOrderOption(
+            CompletedOrder.Everywhere,
+            "Everywhere",
+            "Completed subtasks sink to the bottom, last completed on top.",
+            completedOrder,
+            onCompletedOrderChange,
+        )
+    }
+}
+
+@Composable
+private fun CompletedOrderOption(
+    option: CompletedOrder,
+    title: String,
+    description: String,
+    selected: CompletedOrder,
+    onSelect: (CompletedOrder) -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .selectable(selected = option == selected, role = Role.RadioButton, onClick = { onSelect(option) })
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = option == selected, onClick = null)
+        Column(Modifier.padding(start = 16.dp)) {
+            Text(title)
+            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
 @Composable
 private fun TaskTreeScreen(
     tasks: AppState.Tasks,
+    refreshing: Boolean,
+    history: HistoryState,
+    onOpenPreferences: () -> Unit,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
     onSetCompleted: (uid: String, completed: Boolean) -> Unit,
     onRefresh: () -> Unit,
     onSignOut: () -> Unit,
@@ -128,28 +282,45 @@ private fun TaskTreeScreen(
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(tasks.calendarName, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            TextButton(onClick = onRefresh) { Text("Refresh") }
-            TextButton(onClick = onSignOut) { Text("Sign out") }
-        }
-        LazyColumn(Modifier.fillMaxWidth()) {
-            if (activeRows.isEmpty() && tasks.completed.isEmpty()) item { Text("No tasks.") }
-            items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, onSetCompleted, toggleCollapsed) }
-            if (tasks.completed.isNotEmpty()) {
-                item(key = "completed-header") {
-                    val count = tasks.completed.size
-                    Text(
-                        text = (if (completedSectionOpen) "▾ " else "▸ ") +
-                            "$count Completed ${if (count == 1) "Task" else "Tasks"}",
-                        style = MaterialTheme.typography.titleSmall,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { completedSectionOpen = !completedSectionOpen }
-                            .padding(top = 24.dp, bottom = 8.dp),
-                    )
+            Box {
+                var menuOpen by remember { mutableStateOf(false) }
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(Icons.Default.Menu, contentDescription = "Menu")
                 }
-                if (completedSectionOpen) {
-                    items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, onSetCompleted, toggleCollapsed) }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(text = { Text("Refresh") }, onClick = { menuOpen = false; onRefresh() })
+                    DropdownMenuItem(text = { Text("Preferences") }, onClick = { menuOpen = false; onOpenPreferences() })
+                    DropdownMenuItem(text = { Text("Sign out") }, onClick = { menuOpen = false; onSignOut() })
+                }
+            }
+            Text(tasks.calendarName, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            IconButton(onClick = onUndo, enabled = history.canUndo) {
+                Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo")
+            }
+            IconButton(onClick = onRedo, enabled = history.canRedo) {
+                Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo")
+            }
+        }
+        PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
+            LazyColumn(Modifier.fillMaxSize()) {
+                if (activeRows.isEmpty() && tasks.completed.isEmpty()) item { Text("No tasks.") }
+                items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, onSetCompleted, toggleCollapsed) }
+                if (tasks.completed.isNotEmpty()) {
+                    item(key = "completed-header") {
+                        val count = tasks.completed.size
+                        Text(
+                            text = (if (completedSectionOpen) "▾ " else "▸ ") +
+                                "$count Completed ${if (count == 1) "Task" else "Tasks"}",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { completedSectionOpen = !completedSectionOpen }
+                                .padding(top = 24.dp, bottom = 8.dp),
+                        )
+                    }
+                    if (completedSectionOpen) {
+                        items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, onSetCompleted, toggleCollapsed) }
+                    }
                 }
             }
         }

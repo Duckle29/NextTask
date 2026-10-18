@@ -96,3 +96,56 @@ class TaskTreeCompletionOrderTest {
         assertEquals(listOf("c3", "c2", "c1"), forest.single().children.map { it.uid })
     }
 }
+
+class CompletedOrderTest {
+
+    private fun task(uid: String, parent: String? = null, order: Int, completedAt: String? = null) = Task(
+        uid = uid,
+        summary = uid,
+        parentUid = parent,
+        sortOrder = order,
+        status = if (completedAt != null) TaskStatus.Completed else TaskStatus.NeedsAction,
+        completed = completedAt,
+    )
+
+    // Roots: two completed (r-old is first in normal order). Children of "p" alternate open/completed.
+    private val tasks = listOf(
+        task("r-old", order = 1, completedAt = "20260101T000000Z"),
+        task("r-new", order = 2, completedAt = "20260301T000000Z"),
+        task("p", order = 0),
+        task("a", parent = "p", order = 1),
+        task("b", parent = "p", order = 2, completedAt = "20260101T000000Z"),
+        task("c", parent = "p", order = 3),
+        task("d", parent = "p", order = 4, completedAt = "20260301T000000Z"),
+    )
+
+    private fun completedRoots(setting: CompletedOrder) =
+        TaskTree.build(tasks, setting).filter { it.task.isCompleted }.map { it.uid }
+
+    private fun subtasks(setting: CompletedOrder) =
+        TaskTree.build(tasks, setting).single { it.uid == "p" }.children.map { it.uid }
+
+    @Test
+    fun offMovesNothing() {
+        assertEquals(listOf("r-old", "r-new"), completedRoots(CompletedOrder.Off))
+        assertEquals(listOf("a", "b", "c", "d"), subtasks(CompletedOrder.Off))
+    }
+
+    @Test
+    fun completedListOnlySortsTheListAndLeavesSubtasksInPlace() {
+        assertEquals(listOf("r-new", "r-old"), completedRoots(CompletedOrder.CompletedListOnly))
+        assertEquals(listOf("a", "b", "c", "d"), subtasks(CompletedOrder.CompletedListOnly))
+    }
+
+    @Test
+    fun completedSubtasksLastSinksThemInNormalOrder() {
+        assertEquals(listOf("r-new", "r-old"), completedRoots(CompletedOrder.CompletedSubtasksLast))
+        assertEquals(listOf("a", "c", "b", "d"), subtasks(CompletedOrder.CompletedSubtasksLast))
+    }
+
+    @Test
+    fun everywhereSinksThemNewestFirst() {
+        assertEquals(listOf("r-new", "r-old"), completedRoots(CompletedOrder.Everywhere))
+        assertEquals(listOf("a", "c", "d", "b"), subtasks(CompletedOrder.Everywhere))
+    }
+}

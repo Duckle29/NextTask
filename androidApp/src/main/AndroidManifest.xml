@@ -5,6 +5,7 @@
 
     <application
         android:label="NextTask"
+        android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
             android:name=".MainActivity"

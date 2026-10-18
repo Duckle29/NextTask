@@ -47,3 +47,7 @@ data class Task(
         )
     }
 }
+
+/** Returns a copy stamped with `LAST-MODIFIED:[now]`, which other CalDAV clients use to tell which edit is newer. */
+fun Task.withLastModified(now: String): Task =
+    copy(unmapped = unmapped.filterNot { it.name == "LAST-MODIFIED" } + Property("LAST-MODIFIED", now))

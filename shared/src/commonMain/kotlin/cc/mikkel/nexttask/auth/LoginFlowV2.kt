@@ -10,13 +10,13 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
 import io.ktor.http.parameters
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
-import kotlin.time.TimeSource
 
 /** What the app needs to send the user to the browser and then collect the result. */
 data class LoginSession(
@@ -62,18 +62,32 @@ class LoginFlowV2(
         return Credentials(body.server.trimEnd('/'), body.loginName, body.appPassword)
     }
 
-    /** Polls until approved. The server invalidates the session after 20 minutes. */
+    /**
+     * Polls until approved. The server invalidates the session after 20 minutes.
+     *
+     * Network errors (the app is usually in the background while the user logs in, which makes
+     * lookups and connections fail intermittently) are retried; server answers that are not
+     * "still pending" abort the login.
+     */
     suspend fun awaitCredentials(
         session: LoginSession,
         interval: Duration = 2.seconds,
         timeout: Duration = 20.minutes,
     ): Credentials {
-        val start = TimeSource.Monotonic.markNow()
-        while (start.elapsedNow() < timeout) {
-            poll(session)?.let { return it }
+        var lastError: Exception? = null
+        repeat(maxOf(1, (timeout / interval).toInt())) {
+            try {
+                poll(session)?.let { return it }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: LoginFailedException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+            }
             delay(interval)
         }
-        throw LoginFailedException("Login was not approved in time")
+        throw LoginFailedException("Login was not approved in time", lastError)
     }
 
     private suspend fun HttpResponse.requireSuccess(action: String) {

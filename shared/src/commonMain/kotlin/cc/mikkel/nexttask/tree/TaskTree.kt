@@ -13,6 +13,29 @@ data class TaskNode(val task: Task, val children: List<TaskNode>) {
 
 data class FlatTask(val task: Task, val depth: Int)
 
+/**
+ * How completed tasks are ordered. Every setting keeps open tasks in their normal order
+ * ([Task.sortOrder], then summary); they differ in what happens to completed ones.
+ */
+enum class CompletedOrder(
+    internal val rootCompletedLast: Boolean,
+    internal val rootNewestFirst: Boolean,
+    internal val subtaskCompletedLast: Boolean,
+    internal val subtaskNewestFirst: Boolean,
+) {
+    /** Nothing moves: completed tasks keep their normal position everywhere. */
+    Off(false, false, false, false),
+
+    /** Completed top-level tasks, last completed on top. Subtasks stay in place. */
+    CompletedListOnly(true, true, false, false),
+
+    /** Like [CompletedListOnly], and completed subtasks sink below the open ones, in normal order. */
+    CompletedSubtasksLast(true, true, true, false),
+
+    /** Completed tasks sink below open ones at every level, last completed on top. */
+    Everywhere(true, true, true, true),
+}
+
 object TaskTree {
 
     /**
@@ -20,10 +43,10 @@ object TaskTree {
      *
      * Tasks whose parent is unknown (deleted, or in another calendar) become roots instead of
      * disappearing, and tasks that are part of a parent cycle are broken out as roots so the
-     * result is always a finite tree. Siblings are ordered open tasks first (by [Task.sortOrder],
-     * unset last, then summary), followed by completed tasks, most recently completed first.
+     * result is always a finite tree. Siblings are ordered by [Task.sortOrder] (unset last), then
+     * summary; where completed tasks go relative to that follows [completedOrder].
      */
-    fun build(tasks: List<Task>): List<TaskNode> {
+    fun build(tasks: List<Task>, completedOrder: CompletedOrder = CompletedOrder.Everywhere): List<TaskNode> {
         val byUid = tasks.associateBy { it.uid }
         val rootUids = tasks.filter { effectiveParent(it, byUid) == null }.map { it.uid }.toMutableSet()
 
@@ -41,21 +64,23 @@ object TaskTree {
             }
         }
 
-        val sorted = siblingOrder
+        val rootOrder = siblingOrder(completedOrder.rootCompletedLast, completedOrder.rootNewestFirst)
+        val childOrder = siblingOrder(completedOrder.subtaskCompletedLast, completedOrder.subtaskNewestFirst)
         fun node(task: Task, ancestors: Set<String>): TaskNode = TaskNode(
             task,
             childrenOf[task.uid].orEmpty()
                 .filter { it.uid !in ancestors && it.uid !in rootUids }
-                .sortedWith(sorted)
+                .sortedWith(childOrder)
                 .map { node(it, ancestors + task.uid) },
         )
-        return tasks.filter { it.uid in rootUids }.sortedWith(sorted).map { node(it, setOf(it.uid)) }
+        return tasks.filter { it.uid in rootUids }.sortedWith(rootOrder).map { node(it, setOf(it.uid)) }
     }
 
-    private val siblingOrder = Comparator<Task> { a, b ->
+    private fun siblingOrder(completedLast: Boolean, newestCompletedFirst: Boolean) = Comparator<Task> { a, b ->
         when {
-            a.isCompleted != b.isCompleted -> if (a.isCompleted) 1 else -1
-            a.isCompleted -> compareValues(b.completed, a.completed).takeIf { it != 0 } ?: compareSummary(a, b)
+            completedLast && a.isCompleted != b.isCompleted -> if (a.isCompleted) 1 else -1
+            completedLast && newestCompletedFirst && a.isCompleted ->
+                compareValues(b.completed, a.completed).takeIf { it != 0 } ?: compareSummary(a, b)
             else -> compareValues(a.sortOrder ?: Int.MAX_VALUE, b.sortOrder ?: Int.MAX_VALUE)
                 .takeIf { it != 0 } ?: compareSummary(a, b)
         }

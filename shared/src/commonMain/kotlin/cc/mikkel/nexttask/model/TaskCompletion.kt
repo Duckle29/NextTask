@@ -1,6 +1,5 @@
 package cc.mikkel.nexttask.model
 
-import cc.mikkel.nexttask.ical.Property
 import cc.mikkel.nexttask.tree.TaskTree
 
 /**
@@ -15,7 +14,7 @@ object TaskCompletion {
         return tasks
             .filter { it.uid in subtree && !it.isCompleted }
             .map {
-                it.copy(status = TaskStatus.Completed, percentComplete = 100, completed = now).modifiedAt(now)
+                it.copy(status = TaskStatus.Completed, percentComplete = 100, completed = now).withLastModified(now)
             }
     }
 
@@ -29,11 +28,7 @@ object TaskCompletion {
         }
         return chain
             .filter { it.isCompleted }
-            .map { it.copy(status = TaskStatus.NeedsAction, percentComplete = 0, completed = null).modifiedAt(now) }
+            .map { it.copy(status = TaskStatus.NeedsAction, percentComplete = 0, completed = null).withLastModified(now) }
     }
 
-    private fun Task.modifiedAt(now: String): Task =
-        copy(unmapped = unmapped.filterNot { it.name == LAST_MODIFIED } + Property(LAST_MODIFIED, now))
-
-    private const val LAST_MODIFIED = "LAST-MODIFIED"
 }
