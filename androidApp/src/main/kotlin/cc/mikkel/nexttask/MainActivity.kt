@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -27,13 +29,17 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
@@ -279,6 +285,8 @@ private fun TaskTreeScreen(
     val activeRows = remember(tasks.active, collapsed) { tasks.active.flatMap { visibleRows(it, collapsed) } }
     val completedRows = remember(tasks.completed, collapsed) { tasks.completed.flatMap { visibleRows(it, collapsed) } }
     val toggleCollapsed = { uid: String -> collapsed = collapsed.toggle(uid) }
+    val pullState = rememberPullToRefreshState()
+    val pullThresholdPx = with(LocalDensity.current) { PullToRefreshDefaults.PositionalThreshold.toPx() }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -301,22 +309,36 @@ private fun TaskTreeScreen(
                 Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo")
             }
         }
-        PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
-            LazyColumn(Modifier.fillMaxSize()) {
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = onRefresh,
+            state = pullState,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            LazyColumn(
+                // Let the list follow the finger like an overscroll, and ease back on release.
+                Modifier.fillMaxSize().graphicsLayer { translationY = pullState.distanceFraction * pullThresholdPx },
+            ) {
                 if (activeRows.isEmpty() && tasks.completed.isEmpty()) item { Text("No tasks.") }
                 items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, onSetCompleted, toggleCollapsed) }
                 if (tasks.completed.isNotEmpty()) {
                     item(key = "completed-header") {
                         val count = tasks.completed.size
-                        Text(
-                            text = (if (completedSectionOpen) "▾ " else "▸ ") +
-                                "$count Completed ${if (count == 1) "Task" else "Tasks"}",
-                            style = MaterialTheme.typography.titleSmall,
-                            modifier = Modifier
+                        Row(
+                            Modifier
                                 .fillMaxWidth()
-                                .clickable { completedSectionOpen = !completedSectionOpen }
+                                .clickable(role = Role.Button) { completedSectionOpen = !completedSectionOpen }
                                 .padding(top = 24.dp, bottom = 8.dp),
-                        )
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(Modifier.size(FOLD_TARGET_SIZE), contentAlignment = Alignment.Center) {
+                                FoldIcon(expanded = completedSectionOpen)
+                            }
+                            Text(
+                                "$count Completed ${if (count == 1) "Task" else "Tasks"}",
+                                style = MaterialTheme.typography.titleSmall,
+                            )
+                        }
                     }
                     if (completedSectionOpen) {
                         items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, onSetCompleted, toggleCollapsed) }
@@ -336,21 +358,18 @@ private fun TaskRow(
 ) {
     val task = row.node.task
     val hasChildren = row.node.children.isNotEmpty()
-    val marker = when {
-        !hasChildren -> ""
-        row.node.uid in collapsed -> "▸"
-        else -> "▾"
-    }
     Row(
         Modifier.fillMaxWidth().padding(start = (row.depth * 24).dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            marker,
-            modifier = Modifier
-                .width(20.dp)
-                .clickable(enabled = hasChildren) { onToggleCollapsed(row.node.uid) },
-        )
+        Box(
+            Modifier
+                .size(FOLD_TARGET_SIZE)
+                .clickable(enabled = hasChildren, role = Role.Button) { onToggleCollapsed(row.node.uid) },
+            contentAlignment = Alignment.Center,
+        ) {
+            if (hasChildren) FoldIcon(expanded = row.node.uid !in collapsed)
+        }
         Checkbox(checked = task.isCompleted, onCheckedChange = { onSetCompleted(task.uid, it) })
         Column(Modifier.weight(1f)) {
             Text(
@@ -363,6 +382,17 @@ private fun TaskRow(
             }
         }
     }
+}
+
+private val FOLD_TARGET_SIZE = 32.dp
+
+@Composable
+private fun FoldIcon(expanded: Boolean) {
+    Icon(
+        imageVector = if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
+        contentDescription = if (expanded) "Collapse" else "Expand",
+        modifier = Modifier.size(24.dp),
+    )
 }
 
 private data class VisibleRow(val node: TaskNode, val depth: Int)
