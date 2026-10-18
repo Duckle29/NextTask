@@ -31,20 +31,26 @@ data class StoredTask(
     val isDirty: Boolean get() = if (isDeleted) !isNew else isNew || base != null
 }
 
-/** Everything the app knows about one task list of the account. */
+/**
+ * Everything the app knows about one task list of the account. A list created on this device is [isNew]
+ * until the server has it; its [href] is chosen up front, so its tasks' hrefs stay valid once it is uploaded.
+ */
 @Serializable
 data class CalendarSnapshot(
-    /** Where the list lives on the server; identifies it. */
+    /** Where the list lives (or, while [isNew], will live) on the server; identifies it. */
     val href: String,
     val name: String,
     /** The list's colour as the server reports it (e.g. `#0082c9`), if any. */
     val color: String? = null,
+    /** Also a calendar for events, so deleting the list deletes those too. */
+    val acceptsEvents: Boolean = false,
     val syncToken: String? = null,
     /** All tasks of the list by UID, including deleted ones that the server has not been told about. */
     val tasks: Map<String, StoredTask> = emptyMap(),
+    val isNew: Boolean = false,
 ) {
-    /** Number of tasks with changes (edits, creations, deletions) the server has not received yet. */
-    val pendingChanges: Int get() = tasks.values.count { it.isDirty }
+    /** Number of changes the server has not received yet: to tasks (edits, creations, deletions) and the list's own creation. */
+    val pendingChanges: Int get() = tasks.values.count { it.isDirty } + (if (isNew) 1 else 0)
 
     /** The tasks the user sees: everything that is not deleted. */
     val currentTasks: List<Task> get() = tasks.values.filterNot { it.isDeleted }.map { it.task }
@@ -55,8 +61,10 @@ data class CalendarSnapshot(
 data class AccountSnapshot(
     val serverUrl: String,
     val loginName: String,
-    /** In the order the server lists them. Empty until the first sync has found them. */
+    /** In the order the server lists them, followed by lists created here. Empty until the first sync has found them. */
     val calendars: List<CalendarSnapshot> = emptyList(),
+    /** The server collection the account's lists live in, as of the last sync; where new lists go. */
+    val calendarHome: String? = null,
     /** Bump when the stored format changes incompatibly; older snapshots are then discarded and re-synced. */
     val schemaVersion: Int = SCHEMA_VERSION,
 ) {

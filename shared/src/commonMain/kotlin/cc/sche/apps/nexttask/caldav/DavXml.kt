@@ -58,6 +58,13 @@ internal object DavXml {
             hrefs.joinToString("") { "<d:href>${escape(it)}</d:href>" } +
             "</c:calendar-multiget>"
 
+    /** Creates a calendar named [displayName] that accepts tasks only. */
+    fun mkTaskCalendar(displayName: String): String =
+        "$HEADER<c:mkcalendar $NAMESPACES><d:set><d:prop>" +
+            "<d:displayname>${escape(displayName)}</d:displayname>" +
+            "<c:supported-calendar-component-set><c:comp name=\"VTODO\"/></c:supported-calendar-component-set>" +
+            "</d:prop></d:set></c:mkcalendar>"
+
     private fun escape(text: String): String =
         text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 }

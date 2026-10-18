@@ -25,7 +25,7 @@ class FakeCalDavServer {
 
     private class Resource(var etag: String, var ics: String, var changedAt: Int)
 
-    private class Calendar(val href: String, var name: String) {
+    private class Calendar(val href: String, var name: String, val acceptsEvents: Boolean = false) {
         val resources = linkedMapOf<String, Resource>() // by href
         val deletions = mutableListOf<Pair<String, Int>>() // href, version
         var version = 1
@@ -44,7 +44,7 @@ class FakeCalDavServer {
     /** Every request the server received, as `METHOD /path`. */
     val requests = mutableListOf<String>()
 
-    val calendarHref = "/remote.php/dav/calendars/u/tasks/"
+    val calendarHref = "${HOME}tasks/"
     val credentials = Credentials("https://cloud.example.com", "u", "pw")
 
     init {
@@ -53,12 +53,16 @@ class FakeCalDavServer {
 
     fun client() = CalDavClient(HttpClient(MockEngine { handle(it) }), credentials)
 
-    /** Adds a task list and returns its href. */
-    fun addCalendar(id: String, name: String): String {
-        val href = "/remote.php/dav/calendars/u/$id/"
-        calendars[href] = Calendar(href, name)
+    /** Adds a task list (with [acceptsEvents], one that is also an event calendar) and returns its href. */
+    fun addCalendar(id: String, name: String, acceptsEvents: Boolean = false): String =
+        addCalendarAt("$HOME$id/", name, acceptsEvents)
+
+    fun addCalendarAt(href: String, name: String, acceptsEvents: Boolean = false): String {
+        calendars[href] = Calendar(href, name, acceptsEvents)
         return href
     }
+
+    fun calendarNames(): Map<String, String> = calendars.mapValues { it.value.name }
 
     fun renameCalendar(href: String, name: String) {
         calendars.getValue(href).name = name
@@ -109,13 +113,15 @@ class FakeCalDavServer {
         return when (request.method.value) {
             "PROPFIND" -> when (path) {
                 "/remote.php/dav/" -> xml("<d:response><d:href>$path</d:href>${ok200("<d:current-user-principal><d:href>/principals/u/</d:href></d:current-user-principal>")}</d:response>")
-                "/principals/u/" -> xml("<d:response><d:href>$path</d:href>${ok200("<c:calendar-home-set><d:href>/remote.php/dav/calendars/u/</d:href></c:calendar-home-set>")}</d:response>")
+                "/principals/u/" -> xml("<d:response><d:href>$path</d:href>${ok200("<c:calendar-home-set><d:href>$HOME</d:href></c:calendar-home-set>")}</d:response>")
                 else -> xml(
                     calendars.values.joinToString("") { cal ->
                         "<d:response><d:href>${cal.href}</d:href>" + ok200(
                             "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype><d:displayname>${cal.name}</d:displayname>" +
                                 "<a:calendar-color>#0082c9</a:calendar-color>" +
-                                "<c:supported-calendar-component-set><c:comp name=\"VTODO\"/></c:supported-calendar-component-set>",
+                                "<c:supported-calendar-component-set><c:comp name=\"VTODO\"/>" +
+                                (if (cal.acceptsEvents) "<c:comp name=\"VEVENT\"/>" else "") +
+                                "</c:supported-calendar-component-set>",
                         ) + "</d:response>"
                     },
                 )
@@ -125,7 +131,8 @@ class FakeCalDavServer {
                 if ("sync-collection" in body) syncCollection(cal, body) else multiget(cal, body)
             }
             "PUT" -> put(request, body)
-            "DELETE" -> delete(request)
+            "MKCALENDAR" -> mkcalendar(path, body)
+            "DELETE" -> if (path in calendars) deleteCalendar(path) else delete(request)
             else -> error("Unexpected ${request.method} $path")
         }
     }
@@ -157,6 +164,19 @@ class FakeCalDavServer {
         )
     }
 
+    private fun MockRequestHandleScope.mkcalendar(path: String, body: String): HttpResponseData {
+        if (!path.startsWith(HOME) || !path.endsWith("/")) return respond("", HttpStatusCode.Forbidden)
+        if (path in calendars) return respond("", HttpStatusCode.MethodNotAllowed)
+        val name = Regex("<d:displayname>(.*?)</d:displayname>").find(body)?.groupValues?.get(1).orEmpty()
+        calendars[path] = Calendar(path, name)
+        return respond("", HttpStatusCode.Created)
+    }
+
+    private fun MockRequestHandleScope.deleteCalendar(href: String): HttpResponseData {
+        calendars.remove(href)
+        return respond("", HttpStatusCode.NoContent)
+    }
+
     private fun MockRequestHandleScope.delete(request: HttpRequestData): HttpResponseData {
         val href = request.url.encodedPath
         val cal = calendarFor(href) ?: return respond("", HttpStatusCode.NotFound)
@@ -185,6 +205,8 @@ class FakeCalDavServer {
         return respond("", if (existing == null) HttpStatusCode.Created else HttpStatusCode.NoContent, headersOf(HttpHeaders.ETag, etag))
     }
 }
+
+private const val HOME = "/remote.php/dav/calendars/u/"
 
 /** The only list of an account that has just one. */
 fun AccountSnapshot.only(): CalendarSnapshot = calendars.single()

@@ -185,4 +185,135 @@ class TaskRepositoryMultiListTest {
         assertEquals(before, repo.snapshot.value)
         assertNotNull(repo.list(tasks))
     }
+
+    @Test
+    fun aListCreatedOfflineIsUsableAtOnceAndReachesTheServerWithItsTasks() = runTest {
+        val repo = repository().also { it.sync() }
+
+        server.offline = true
+        val errands = repo.createList("Errands")
+        repo.create(errands, task("e"))
+        assertFailsWith<RuntimeException> { repo.sync(full = false) }
+
+        assertEquals(setOf("e"), repo.uids(errands))
+        assertEquals(2, repo.list(errands)?.pendingChanges, "the list and its task")
+        assertTrue(errands.startsWith("/remote.php/dav/calendars/u/"), errands)
+
+        server.offline = false
+        repo.sync(full = false)
+
+        assertEquals("Errands", server.calendarNames()[errands])
+        assertTrue(server.hasTask("e", errands))
+        assertEquals(false, repo.list(errands)?.isNew)
+        assertEquals(0, repo.snapshot.value.pendingChanges)
+    }
+
+    @Test
+    fun aCreatedListIsCreatedOnceAndKeepsItsPlace() = runTest {
+        val repo = repository().also { it.sync() }
+
+        val errands = repo.createList("Errands")
+        repo.sync()
+        repo.sync()
+
+        assertEquals(listOf("Tasks", "Work", "Errands"), repo.snapshot.value.calendars.map { it.name })
+        assertEquals(errands, repo.snapshot.value.calendars.last().href)
+        assertEquals(1, server.requests.count { it.startsWith("MKCALENDAR") })
+    }
+
+    @Test
+    fun aNewListWhoseNameIsTakenIsRenamedInsteadOfMerged() = runTest {
+        val repo = repository().also { it.sync() }
+        server.addCalendar("errands", "Errands") // made on another device meanwhile
+
+        val first = repo.createList("errands")
+        val second = repo.createList("Errands")
+        val report = repo.sync(full = false)
+
+        assertEquals("errands (offline)", server.calendarNames()[first])
+        assertEquals("Errands (offline 2)", server.calendarNames()[second])
+        assertEquals(
+            listOf(RenamedList("errands", "errands (offline)"), RenamedList("Errands", "Errands (offline 2)")),
+            report.renamedLists,
+        )
+        assertEquals(listOf("Tasks", "Work", "Errands", "errands (offline)", "Errands (offline 2)"), repo.snapshot.value.calendars.map { it.name })
+    }
+
+    @Test
+    fun aNewListTheServerAlreadyHasIsOursFromAnUnconfirmedUpload() = runTest {
+        val repo = repository().also { it.sync() }
+        val errands = repo.createList("Errands")
+        repo.create(errands, task("e"))
+        server.addCalendarAt(errands, "Errands") // created, but the answer never arrived
+
+        repo.sync(full = false)
+
+        assertTrue(server.requests.none { it.startsWith("MKCALENDAR") })
+        assertEquals(listOf("Tasks", "Work", "Errands"), repo.snapshot.value.calendars.map { it.name })
+        assertTrue(server.hasTask("e", errands))
+        assertEquals(0, repo.snapshot.value.pendingChanges)
+    }
+
+    @Test
+    fun listsCanOnlyBeCreatedOnceTheServerHasBeenReached() {
+        assertFailsWith<CalendarHomeUnknownException> { repository().createList("Errands") }
+    }
+
+    @Test
+    fun aNewListNotYetOnTheServerIsDeletedLocally() = runTest {
+        val repo = repository().also { it.sync() }
+        val errands = repo.createList("Errands")
+        repo.create(errands, task("e"))
+        server.requests.clear()
+
+        repo.deleteList(errands)
+        repo.sync(full = false)
+
+        assertTrue(server.requests.isEmpty(), "${server.requests}")
+        assertEquals(listOf("Tasks", "Work"), repo.snapshot.value.calendars.map { it.name })
+    }
+
+    @Test
+    fun aDeletedListIsGoneFromTheServerAndTheDevice() = runTest {
+        server.write(task("b"), work)
+        val repo = repository().also { it.sync() }
+        repo.create(work, task("c"))
+
+        repo.deleteList(work)
+
+        assertFalse(work in server.calendarNames())
+        assertEquals(listOf("Tasks"), repo.snapshot.value.calendars.map { it.name })
+        assertEquals(0, repo.snapshot.value.pendingChanges)
+    }
+
+    @Test
+    fun deletingAListOfflineFailsAndKeepsIt() = runTest {
+        val repo = repository().also { it.sync() }
+
+        server.offline = true
+        assertFailsWith<RuntimeException> { repo.deleteList(work) }
+
+        assertNotNull(repo.list(work))
+    }
+
+    @Test
+    fun theLastListCannotBeDeleted() = runTest {
+        server.removeCalendar(work)
+        val repo = repository().also { it.sync() }
+        server.requests.clear()
+
+        assertFailsWith<LastTaskListException> { repo.deleteList(tasks) }
+
+        assertTrue(server.requests.isEmpty())
+        assertNotNull(repo.list(tasks))
+    }
+
+    @Test
+    fun listsThatAlsoHoldEventsAreMarked() = runTest {
+        val personal = server.addCalendar("personal", "Personal", acceptsEvents = true)
+        val repo = repository().also { it.sync() }
+
+        assertEquals(true, repo.list(personal)?.acceptsEvents)
+        assertEquals(false, repo.list(work)?.acceptsEvents)
+    }
 }

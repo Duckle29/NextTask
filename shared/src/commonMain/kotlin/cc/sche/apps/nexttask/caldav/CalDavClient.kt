@@ -23,14 +23,28 @@ import io.ktor.http.encodeURLPathPart
 import io.ktor.http.encodedPath
 import io.ktor.http.isSuccess
 import io.ktor.http.takeFrom
+import kotlin.uuid.Uuid
 
-/** A calendar collection that can hold tasks. [href] is the server-absolute path, ending in `/`. */
+/**
+ * A calendar collection that can hold tasks. [href] is the server-absolute path, ending in `/`.
+ * With [acceptsEvents] it is also a calendar for events (like Nextcloud's default "Personal").
+ */
 data class TaskCalendar(
     val href: String,
     val displayName: String,
     val color: String?,
     val syncToken: String?,
+    val acceptsEvents: Boolean = false,
 )
+
+/** Where the user's calendars live ([href]), and the ones among them that accept tasks. */
+data class CalendarHome(val href: String, val calendars: List<TaskCalendar>)
+
+/**
+ * A fresh place for a new calendar in the calendar home [homeHref]. The path segment is random rather than
+ * derived from the name: names may be anything, and a list can be renamed without moving.
+ */
+fun newCalendarHref(homeHref: String): String = homeHref.trimEnd('/') + "/" + Uuid.random() + "/"
 
 /** The resource a task is stored in. The UID is escaped as one path segment, so it can never leave the calendar. */
 internal fun taskHref(calendarHref: String, uid: String): String =
@@ -64,23 +78,10 @@ class CalDavClient(
     private val credentials: Credentials,
 ) {
 
-    /** Finds all calendars of the user that accept VTODO components. */
-    suspend fun discoverTaskCalendars(): List<TaskCalendar> {
-        val principal = propfind(
-            url = "${credentials.serverUrl}/remote.php/dav/",
-            depth = 0,
-            body = DavXml.propfind("d:current-user-principal"),
-        ).responses.firstNotNullOfOrNull { it.prop(Dav.NS, "current-user-principal")?.child(Dav.NS, "href")?.text }
-            ?: throw DavException(0, "Server did not report a user principal")
-
-        val home = propfind(
-            url = resolve(principal),
-            depth = 0,
-            body = DavXml.propfind("c:calendar-home-set"),
-        ).responses.firstNotNullOfOrNull { it.prop(Dav.CALDAV, "calendar-home-set")?.child(Dav.NS, "href")?.text }
-            ?: throw DavException(0, "Server did not report a calendar home")
-
-        return propfind(
+    /** Finds the user's calendar home and all calendars in it that accept VTODO components. */
+    suspend fun discoverCalendarHome(): CalendarHome {
+        val home = calendarHome()
+        val calendars = propfind(
             url = resolve(home),
             depth = 1,
             body = DavXml.propfind(
@@ -89,17 +90,52 @@ class CalDavClient(
             ),
         ).responses.mapNotNull { response ->
             val isCalendar = response.prop(Dav.NS, "resourcetype")?.child(Dav.CALDAV, "calendar") != null
-            val supportsTodo = response.prop(Dav.CALDAV, "supported-calendar-component-set")
+            val components = response.prop(Dav.CALDAV, "supported-calendar-component-set")
                 ?.children(Dav.CALDAV, "comp")
-                ?.any { it.attributes["name"] == "VTODO" } ?: false
-            if (!isCalendar || !supportsTodo) return@mapNotNull null
+                ?.mapNotNull { it.attributes["name"] }
+                .orEmpty()
+            if (!isCalendar || "VTODO" !in components) return@mapNotNull null
             TaskCalendar(
                 href = response.href,
                 displayName = response.prop(Dav.NS, "displayname")?.text.orEmpty(),
                 color = response.prop(Dav.APPLE, "calendar-color")?.text?.takeIf { it.isNotEmpty() },
                 syncToken = response.prop(Dav.NS, "sync-token")?.text?.takeIf { it.isNotEmpty() },
+                acceptsEvents = "VEVENT" in components,
             )
         }
+        return CalendarHome(home, calendars)
+    }
+
+    /**
+     * Creates a calendar that only holds tasks, named [displayName], at [calendarHref] (see [newCalendarHref]).
+     * Fails if something exists there already.
+     */
+    suspend fun createTaskCalendar(calendarHref: String, displayName: String) {
+        require(calendarHref.endsWith("/")) { "Not a calendar: $calendarHref" }
+        request(MKCALENDAR, resolve(calendarHref), DavXml.mkTaskCalendar(displayName), depth = null).requireSuccess()
+    }
+
+    /** Deletes the calendar at [calendarHref] with everything in it. */
+    suspend fun deleteCalendar(calendarHref: String) {
+        require(calendarHref.endsWith("/")) { "Not a calendar: $calendarHref" }
+        delete(calendarHref, etag = null)
+    }
+
+    /** The collection the user's calendars live in. */
+    private suspend fun calendarHome(): String {
+        val principal = propfind(
+            url = "${credentials.serverUrl}/remote.php/dav/",
+            depth = 0,
+            body = DavXml.propfind("d:current-user-principal"),
+        ).responses.firstNotNullOfOrNull { it.prop(Dav.NS, "current-user-principal")?.child(Dav.NS, "href")?.text }
+            ?: throw DavException(0, "Server did not report a user principal")
+
+        return propfind(
+            url = resolve(principal),
+            depth = 0,
+            body = DavXml.propfind("c:calendar-home-set"),
+        ).responses.firstNotNullOfOrNull { it.prop(Dav.CALDAV, "calendar-home-set")?.child(Dav.NS, "href")?.text }
+            ?: throw DavException(0, "Server did not report a calendar home")
     }
 
     /**
@@ -146,7 +182,7 @@ class CalDavClient(
     }
 
     /**
-     * Deletes the resource at [href]. With an [etag] the server refuses (HTTP 412, [ConflictException]) if the
+     * Deletes the task at [href]. With an [etag] the server refuses (HTTP 412, [ConflictException]) if the
      * task changed since; without one, which only happens if the server never reported the ETag, it is
      * deleted whatever its state.
      */
@@ -220,6 +256,7 @@ class CalDavClient(
 
     private companion object {
         val PROPFIND = HttpMethod("PROPFIND")
+        val MKCALENDAR = HttpMethod("MKCALENDAR")
         val REPORT = HttpMethod("REPORT")
         val XML = ContentType.Application.Xml
         val ICS = ContentType("text", "calendar")

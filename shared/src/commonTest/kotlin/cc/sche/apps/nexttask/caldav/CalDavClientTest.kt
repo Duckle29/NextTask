@@ -73,11 +73,12 @@ class CalDavClientTest {
             }
         }
 
-        val calendars = client.discoverTaskCalendars()
+        val home = client.discoverCalendarHome()
 
+        assertEquals("/remote.php/dav/calendars/mikkel/", home.href)
         assertEquals(
             listOf(TaskCalendar("/remote.php/dav/calendars/mikkel/tasks/", "Tasks", "#0082c9", "http://sabre.io/ns/sync/42")),
-            calendars,
+            home.calendars,
         )
     }
 
@@ -215,6 +216,52 @@ class CalDavClientTest {
     @Test
     fun unauthorizedIsDistinguished() = runTest {
         val client = client { respond("", HttpStatusCode.Unauthorized) }
-        assertFailsWith<UnauthorizedException> { client.discoverTaskCalendars() }
+        assertFailsWith<UnauthorizedException> { client.discoverCalendarHome() }
+    }
+
+    @Test
+    fun newCalendarsGetARandomPlaceInTheHome() {
+        val href = newCalendarHref("/remote.php/dav/calendars/mikkel/")
+        assertTrue(Regex("/remote\\.php/dav/calendars/mikkel/[0-9a-f-]{36}/").matches(href), href)
+        assertTrue(href != newCalendarHref("/remote.php/dav/calendars/mikkel/"))
+    }
+
+    @Test
+    fun createsATaskOnlyCalendar() = runTest {
+        var request: HttpRequestData? = null
+        var body = ""
+        val client = client { r ->
+            request = r
+            body = r.body.toByteArray().decodeToString()
+            respond("", HttpStatusCode.Created)
+        }
+
+        client.createTaskCalendar("/remote.php/dav/calendars/mikkel/new/", "Errands <& more>")
+
+        assertEquals("MKCALENDAR", request?.method?.value)
+        assertEquals("/remote.php/dav/calendars/mikkel/new/", request?.url?.encodedPath)
+        assertTrue("<d:displayname>Errands &lt;&amp; more&gt;</d:displayname>" in body, body)
+        assertTrue("""<c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set>""" in body, body)
+    }
+
+    @Test
+    fun aFailedCalendarCreationIsAnError() = runTest {
+        val client = client { respond("", HttpStatusCode.MethodNotAllowed) }
+        assertFailsWith<DavException> { client.createTaskCalendar("/remote.php/dav/calendars/mikkel/new/", "Errands") }
+    }
+
+    @Test
+    fun deletingACalendarDeletesTheCollectionUnconditionally() = runTest {
+        var request: HttpRequestData? = null
+        val client = client { r ->
+            request = r
+            respond("", HttpStatusCode.NoContent)
+        }
+
+        client.deleteCalendar("/remote.php/dav/calendars/mikkel/errands/")
+
+        assertEquals(HttpMethod.Delete, request?.method)
+        assertEquals("/remote.php/dav/calendars/mikkel/errands/", request?.url?.encodedPath)
+        assertEquals(null, request?.headers?.get(HttpHeaders.IfMatch))
     }
 }

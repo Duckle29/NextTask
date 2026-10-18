@@ -22,6 +22,7 @@ import cc.sche.apps.nexttask.model.Task
 import cc.sche.apps.nexttask.model.TaskChange
 import cc.sche.apps.nexttask.model.TaskCompletion
 import cc.sche.apps.nexttask.sync.AccountSnapshot
+import cc.sche.apps.nexttask.sync.CalendarHomeUnknownException
 import cc.sche.apps.nexttask.sync.CalendarSnapshot
 import cc.sche.apps.nexttask.sync.SyncReport
 import cc.sche.apps.nexttask.sync.TaskRepository
@@ -82,8 +83,19 @@ sealed interface AppState {
     }
 }
 
-/** A task list of the account, as shown in the side drawer. */
-data class TaskList(val href: String, val name: String, val color: String?, val pendingChanges: Int)
+/**
+ * A task list of the account, as shown in the side drawer. With [acceptsEvents] it is also an event calendar;
+ * while [isNew] it has been created here and the server does not have it yet.
+ */
+data class TaskList(
+    val href: String,
+    val name: String,
+    val color: String?,
+    val taskCount: Int,
+    val pendingChanges: Int,
+    val acceptsEvents: Boolean,
+    val isNew: Boolean,
+)
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -243,6 +255,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         selectedHref = href
         preferences.selectedList = href
         repository?.snapshot?.value?.let(::publish)
+    }
+
+    /** Creates a task list and shows it. Like a task, it is there at once, with or without a connection; the server follows. */
+    fun createList(name: String) {
+        val repository = repository?.takeUnless { accessRevoked } ?: return
+        val text = name.trim()
+        if (text.isEmpty()) return
+        try {
+            selectList(repository.createList(text))
+        } catch (e: CalendarHomeUnknownException) {
+            _message.value = UiMessage("Couldn't create “$text”: ${e.message}", isError = true)
+            return
+        }
+        requestSync(force = true, full = false)
+    }
+
+    /**
+     * Deletes a task list with its tasks. One the server has is deleted there right away, which needs a
+     * connection; one not synced yet is only on this device and goes at once.
+     */
+    fun deleteList(href: String) {
+        val repository = repository?.takeUnless { accessRevoked } ?: return
+        val name = repository.snapshot.value.calendar(href)?.name ?: return
+        viewModelScope.launch(accountWork) {
+            try {
+                repository.deleteList(href)
+                histories.remove(href)
+                _message.value = UiMessage("Deleted “$name”", isError = false)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: UnauthorizedException) {
+                onAccessRevoked()
+            } catch (e: Exception) {
+                _message.value = UiMessage("Couldn't delete “$name”: ${describe(e)}", isError = true)
+            }
+        }
     }
 
     fun setCompletedOrder(order: CompletedOrder) {
@@ -434,7 +482,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val list = selected(snapshot) ?: return
         selectedHref = list.href
         val (completed, active) = TaskTree.build(list.currentTasks, _completedOrder.value).partition { it.task.isCompleted }
-        val lists = snapshot.calendars.map { TaskList(it.href, it.name, it.color, it.pendingChanges) }
+        val lists = snapshot.calendars.map {
+            TaskList(it.href, it.name, it.color, it.currentTasks.size, it.pendingChanges, it.acceptsEvents, it.isNew)
+        }
         _state.value = AppState.Tasks(lists, list.href, active, completed, accessRevoked, snapshot.pendingChanges)
     }
 
@@ -486,6 +536,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (report.restoredDeletions > 0) {
                 add("${report.restoredDeletions} deleted ${if (report.restoredDeletions == 1) "task was" else "tasks were"} kept because ${if (report.restoredDeletions == 1) "it was" else "they were"} changed on the server")
+            }
+            for (renamed in report.renamedLists) {
+                add("A list named “${renamed.from}” already existed on the server, so the new one is called “${renamed.to}”")
             }
             if (report.discardedEdits > 0) {
                 add("${report.discardedEdits} offline ${if (report.discardedEdits == 1) "change was" else "changes were"} dropped because the task was deleted on the server")

@@ -37,6 +37,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -146,6 +147,8 @@ private fun App(viewModel: AppViewModel) {
             syncStatus = syncStatus,
             history = history,
             onSelectList = viewModel::selectList,
+            onCreateList = viewModel::createList,
+            onDeleteList = viewModel::deleteList,
             onOpenPreferences = { showPreferences = true },
             onUndo = viewModel::undo,
             onRedo = viewModel::redo,
@@ -372,6 +375,8 @@ private fun TaskTreeScreen(
     syncStatus: SyncStatus,
     history: HistoryState,
     onSelectList: (href: String) -> Unit,
+    onCreateList: (name: String) -> Unit,
+    onDeleteList: (href: String) -> Unit,
     onOpenPreferences: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
@@ -407,9 +412,11 @@ private fun TaskTreeScreen(
     var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
     if (adding) {
         val parent = addParentUid?.let { uid -> findNode(tasks.active + tasks.completed, uid) }
-        AddTaskDialog(
-            parentName = parent?.task?.summary,
-            onAdd = { summary ->
+        TextInputDialog(
+            title = if (parent == null) "New task" else "New subtask of “${parent.task.summary}”",
+            label = "Task",
+            confirmLabel = "Add",
+            onConfirm = { summary ->
                 onAddTask(summary, parent?.uid)
                 // A subtask added to a folded task would vanish; show it.
                 parent?.let { collapsed = collapsed - it.uid }
@@ -426,6 +433,26 @@ private fun TaskTreeScreen(
             text = { Text("“${node.task.summary}” and its $subtasks ${if (subtasks == 1) "subtask" else "subtasks"} will be deleted.") },
             confirmButton = { TextButton(onClick = { confirmDeleteUid = null; onDeleteTask(node.uid) }) { Text("Delete") } },
             dismissButton = { TextButton(onClick = { confirmDeleteUid = null }) { Text("Cancel") } },
+        )
+    }
+    var creatingList by rememberSaveable { mutableStateOf(false) }
+    if (creatingList) {
+        TextInputDialog(
+            title = "New list",
+            label = "Name",
+            confirmLabel = "Create",
+            onConfirm = { name -> onCreateList(name); creatingList = false },
+            onDismiss = { creatingList = false },
+        )
+    }
+    var confirmDeleteList by rememberSaveable { mutableStateOf<String?>(null) }
+    confirmDeleteList?.let { href -> tasks.lists.firstOrNull { it.href == href } }?.let { list ->
+        AlertDialog(
+            onDismissRequest = { confirmDeleteList = null },
+            title = { Text("Delete “${list.name}”?") },
+            text = { Text(deleteListWarning(list)) },
+            confirmButton = { TextButton(onClick = { confirmDeleteList = null; onDeleteList(list.href) }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { confirmDeleteList = null }) { Text("Cancel") } },
         )
     }
     val onAddSubtask = { uid: String -> addParentUid = uid; adding = true }
@@ -452,6 +479,8 @@ private fun TaskTreeScreen(
             ListsDrawer(
                 tasks = tasks,
                 onSelectList = { href -> closeThen { onSelectList(href) } },
+                onNewList = { closeThen { creatingList = true } },
+                onDeleteList = { closeThen { confirmDeleteList = tasks.selectedHref } },
                 onRefresh = { closeThen(onRefresh) },
                 onExport = { closeThen { exportLauncher.launch(exportFileName(tasks.calendarName)) } },
                 onOpenPreferences = { closeThen(onOpenPreferences) },
@@ -530,6 +559,8 @@ private fun TaskTreeScreen(
 private fun ListsDrawer(
     tasks: AppState.Tasks,
     onSelectList: (href: String) -> Unit,
+    onNewList: () -> Unit,
+    onDeleteList: () -> Unit,
     onRefresh: () -> Unit,
     onExport: () -> Unit,
     onOpenPreferences: () -> Unit,
@@ -554,8 +585,11 @@ private fun ListsDrawer(
                         modifier = Modifier.padding(horizontal = 12.dp),
                     )
                 }
+                if (!tasks.accessRevoked) DrawerAction("New list", Icons.Default.Add, onNewList)
             }
             HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
+            // The last list stays: without one there would be nothing to show.
+            if (!tasks.accessRevoked && tasks.lists.size > 1) DrawerAction("Delete this list…", Icons.Default.Delete, onDeleteList)
             if (!tasks.accessRevoked) DrawerAction("Refresh", Icons.Default.Refresh, onRefresh)
             DrawerAction("Export tasks…", Icons.Default.Download, onExport)
             DrawerAction("Preferences", Icons.Default.Settings, onOpenPreferences)
@@ -595,28 +629,48 @@ internal fun parseServerColor(value: String): Color? {
 
 private const val DRAWER_WIDTH_FRACTION = 0.72f
 
+/** What deleting [list] takes with it. */
+private fun deleteListWarning(list: TaskList): String = buildString {
+    append(
+        if (list.taskCount == 0) "The list will be deleted"
+        else "The list and its ${list.taskCount} ${if (list.taskCount == 1) "task" else "tasks"} will be deleted",
+    )
+    append(if (list.isNew) "." else " from the server and all your devices.")
+    if (!list.isNew && list.pendingChanges > 0) {
+        append(" ${list.pendingChanges} ${if (list.pendingChanges == 1) "change that hasn't" else "changes that haven't"} synced yet will be lost.")
+    }
+    if (list.acceptsEvents) append(" It is also a calendar: its events will be deleted too.")
+}
+
+/** Asks for one line of text, such as a task's summary or a list's name. */
 @Composable
-private fun AddTaskDialog(parentName: String?, onAdd: (String) -> Unit, onDismiss: () -> Unit) {
-    var summary by rememberSaveable { mutableStateOf("") }
+private fun TextInputDialog(
+    title: String,
+    label: String,
+    confirmLabel: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var text by rememberSaveable { mutableStateOf("") }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
-    val submit = { if (summary.isNotBlank()) onAdd(summary) }
+    val submit = { if (text.isNotBlank()) onConfirm(text) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (parentName == null) "New task" else "New subtask of “$parentName”") },
+        title = { Text(title) },
         text = {
             OutlinedTextField(
-                value = summary,
-                onValueChange = { summary = it },
-                label = { Text("Task") },
+                value = text,
+                onValueChange = { text = it },
+                label = { Text(label) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { submit() }),
                 modifier = Modifier.fillMaxWidth().focusRequester(focus),
             )
         },
-        confirmButton = { TextButton(onClick = { submit() }, enabled = summary.isNotBlank()) { Text("Add") } },
+        confirmButton = { TextButton(onClick = { submit() }, enabled = text.isNotBlank()) { Text(confirmLabel) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
