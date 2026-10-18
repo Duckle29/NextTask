@@ -1,14 +1,16 @@
 name: Pages
 
-# Publishes the privacy policy (linked from the Play Store listing) to GitHub Pages:
-# https://duckle29.github.io/NextTask/privacy-policy.html
-# Only that page is published; the rest of docs/ stays in the repository.
+# Publishes the website to GitHub Pages: https://duckle29.github.io/NextTask/
+# It is website/ plus the privacy policy (privacy-policy.html, linked from the Play Store listing) and
+# images from branding/play, which are copied in here so they are kept in one place only.
 
 on:
   push:
     branches: [main]
     paths:
+      - website/**
       - docs/play-store/privacy-policy.md
+      - branding/play/**
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -31,9 +33,13 @@ jobs:
 
       - name: Collect the published pages
         run: |
-          mkdir site
+          cp -r website site
           cp docs/play-store/privacy-policy.md site/privacy-policy.md
-          printf 'title: NextTask\ntheme: jekyll-theme-primer\n' > site/_config.yml
+          mkdir site/images
+          cp branding/play/icon-512.png site/images/icon.png
+          cp branding/play/screenshots/1-nested-tasks.png site/images/nested-tasks.png
+          cp branding/play/screenshots/3-works-offline.png site/images/works-offline.png
+          cp branding/play/screenshots/5-task-lists.png site/images/task-lists.png
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
@@ -53,7 +59,7 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}privacy-policy.html
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
