@@ -116,6 +116,8 @@ jobs:
           mkdir release
           cp androidApp/build/outputs/apk/release/androidApp-release.apk "release/NextTask-$VERSION_NAME.apk"
           cp androidApp/build/outputs/bundle/release/androidApp-release.aab "release/NextTask-$VERSION_NAME.aab"
+          # Turns the obfuscated names in a crash report back into readable ones.
+          cp androidApp/build/outputs/mapping/release/mapping.txt "release/NextTask-$VERSION_NAME-mapping.txt"
           (cd release && sha256sum -- * > SHA256SUMS)
           cat release/SHA256SUMS
 

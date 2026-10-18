@@ -9,7 +9,8 @@ git push origin v1.2.3
 ```
 
 The **Release** workflow then checks the tag, builds and signs the app, and publishes a GitHub release with
-the signed APK, the Android App Bundle and a `SHA256SUMS` file.
+the signed APK, the Android App Bundle, the R8 `mapping.txt` (to read crash reports from the shrunk
+build) and a `SHA256SUMS` file.
 
 ## Version numbers
 
@@ -98,5 +99,6 @@ The certificate fingerprint should be the same for every release.
 - **Building a release locally** works without the key: `./gradlew :androidApp:assembleRelease` gives an
   unsigned APK. Set `ANDROID_KEYSTORE_PATH`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and
   `ANDROID_KEY_PASSWORD` to sign it, and pass `-PversionName` and `-PversionCode` to set the version.
-- **Not done yet:** code shrinking (R8) is off, and nothing is uploaded to Google Play. The App Bundle in
-  each release is ready for it.
+- **Code shrinking (R8)** is on for release builds. Keep each release's `mapping.txt`: it is the only way to
+  read a stack trace from that version. Nothing is uploaded to Google Play automatically; the App Bundle in each
+  release is ready for it.

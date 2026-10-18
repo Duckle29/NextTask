@@ -6,3 +6,6 @@ local.properties
 .kotlin/
 .DS_Store
 *.jks
+
+# Local code review notes
+*_review_*.md
