@@ -5,7 +5,9 @@ import cc.sche.apps.nexttask.caldav.ConflictException
 import cc.sche.apps.nexttask.caldav.DavException
 import cc.sche.apps.nexttask.caldav.SyncResult
 import cc.sche.apps.nexttask.caldav.TaskCalendar
+import cc.sche.apps.nexttask.model.Edit
 import cc.sche.apps.nexttask.model.Task
+import cc.sche.apps.nexttask.model.TaskChange
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,11 +22,14 @@ data class SyncReport(
     val mergedEdits: Int = 0,
     /** Offline edits dropped because the task was deleted on the server. */
     val discardedEdits: Int = 0,
+    /** Tasks the user deleted that were kept, because another client changed them in the meantime. */
+    val restoredDeletions: Int = 0,
 ) {
     operator fun plus(other: SyncReport) = SyncReport(
         uploaded + other.uploaded,
         mergedEdits + other.mergedEdits,
         discardedEdits + other.discardedEdits,
+        restoredDeletions + other.restoredDeletions,
     )
 }
 
@@ -50,9 +55,23 @@ class TaskRepository(
 
     private val syncLock = Mutex()
 
-    /** Applies the user's new versions of tasks to the local copy. Syncing them is up to the caller. */
+    /** Applies the user's new versions of existing tasks to the local copy. Syncing them is up to the caller. */
     fun edit(changed: List<Task>) {
         state.update { it.applyEdits(changed) }
+    }
+
+    /** Creates a task. It exists locally at once and reaches the server on the next sync. */
+    fun create(task: Task) = apply(Edit(listOf(TaskChange(before = null, after = task))))
+
+    /** Deletes the tasks with these UIDs. Until the next sync they are only hidden, so deleting can be undone. */
+    fun delete(uids: Collection<String>) {
+        val tasks = state.value.tasks
+        apply(Edit(uids.mapNotNull { tasks[it]?.takeUnless { stored -> stored.isDeleted }?.task }.map { TaskChange(before = it, after = null) }))
+    }
+
+    /** Applies (or, for an [Edit.inverse], reverts) something the user did. */
+    fun apply(edit: Edit) {
+        state.update { it.applyChanges(edit.changes) }
     }
 
     suspend fun sync(): SyncReport = syncLock.withLock {
@@ -78,6 +97,7 @@ class TaskRepository(
         return SyncReport(
             mergedEdits = outcome?.mergedEdits ?: 0,
             discardedEdits = outcome?.discardedEdits ?: 0,
+            restoredDeletions = outcome?.restoredDeletions ?: 0,
         )
     }
 
@@ -106,13 +126,21 @@ class TaskRepository(
     private class UploadOutcome(val uploaded: Int, val conflicted: Boolean)
 
     private suspend fun upload(): UploadOutcome {
+        state.update { it.withoutAbandonedTasks() }
         val calendarHref = state.value.calendarHref ?: return UploadOutcome(0, false)
         var uploaded = 0
         var conflicted = false
-        for ((uid, stored) in state.value.tasks.filterValues { it.isDirty }) {
+        for (uid in state.value.tasks.filterValues { it.isDirty }.keys) {
+            // Look again: the user may have changed or undone things since this sync began.
+            val stored = state.value.tasks[uid]?.takeIf { it.isDirty } ?: continue
             try {
-                val result = client.put(calendarHref, stored.task, href = stored.href, etag = stored.etag)
-                state.update { it.applyUploaded(uid, stored.task, result.etag) }
+                if (stored.isDeleted) {
+                    client.delete(stored.href, stored.etag)
+                    state.update { it.applyDeletedOnServer(uid) }
+                } else {
+                    val result = client.put(calendarHref, stored.task, href = stored.href, etag = stored.etag)
+                    state.update { it.applyUploaded(uid, stored.task, result.etag) }
+                }
                 uploaded++
             } catch (_: ConflictException) {
                 conflicted = true

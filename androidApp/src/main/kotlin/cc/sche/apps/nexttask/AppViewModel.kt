@@ -19,8 +19,8 @@ import cc.sche.apps.nexttask.ical.TaskExport
 import cc.sche.apps.nexttask.model.Edit
 import cc.sche.apps.nexttask.model.EditHistory
 import cc.sche.apps.nexttask.model.Task
+import cc.sche.apps.nexttask.model.TaskChange
 import cc.sche.apps.nexttask.model.TaskCompletion
-import cc.sche.apps.nexttask.model.withLastModified
 import cc.sche.apps.nexttask.sync.AccountSnapshot
 import cc.sche.apps.nexttask.sync.SyncReport
 import cc.sche.apps.nexttask.sync.TaskRepository
@@ -44,14 +44,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.UnknownHostException
+import kotlin.uuid.Uuid
 
 data class HistoryState(val canUndo: Boolean = false, val canRedo: Boolean = false)
 
 /** Progress of syncing with the server. [failure] is why the last attempt failed, until one succeeds. */
 data class SyncStatus(val syncing: Boolean = false, val failure: String? = null)
 
-/** A line shown above the content. */
-data class UiMessage(val text: String, val isError: Boolean)
+/** A line shown above the content. With [undoable] it offers to undo the last edit it reports. */
+data class UiMessage(val text: String, val isError: Boolean, val undoable: Boolean = false)
 
 sealed interface AppState {
     data object LoggedOut : AppState
@@ -246,22 +247,48 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val changed = if (completed) TaskCompletion.complete(tasks, uid, now) else TaskCompletion.reopen(tasks, uid, now)
         if (changed.isEmpty()) return
 
-        history.record(Edit(before = changed.map { snapshot.tasks.getValue(it.uid).task }, after = changed))
-        applyEdit(repository, changed)
+        applyEdit(repository, Edit(changed.map { TaskChange(before = snapshot.tasks.getValue(it.uid).task, after = it) }))
+    }
+
+    /** Adds a task, under [parentUid] if given. It shows up at once, with or without a connection. */
+    fun addTask(summary: String, parentUid: String?) {
+        val repository = repository ?: return
+        if (accessRevoked) return
+        val text = summary.trim()
+        if (text.isEmpty()) return
+        val parent = parentUid?.takeIf { uid -> repository.snapshot.value.currentTasks.any { it.uid == uid } }
+        val task = Task.create(Uuid.random().toString(), text, parent, ICalDateTime.nowUtc())
+        applyEdit(repository, Edit(listOf(TaskChange(before = null, after = task))))
+    }
+
+    /** Deletes a task together with all its subtasks. Undo brings them back. */
+    fun deleteTask(uid: String) {
+        val repository = repository ?: return
+        if (accessRevoked) return
+        val snapshot = repository.snapshot.value
+        val doomed = TaskTree.subtreeUids(snapshot.currentTasks, uid)
+        val changes = doomed.mapNotNull { snapshot.tasks[it]?.takeUnless { stored -> stored.isDeleted }?.task }
+            .map { TaskChange(before = it, after = null) }
+        if (changes.isEmpty()) return
+        applyEdit(repository, Edit(changes))
+        val count = changes.size
+        _message.value = UiMessage("Deleted $count ${if (count == 1) "task" else "tasks"}", isError = false, undoable = true)
     }
 
     fun undo() {
         val repository = repository ?: return
         if (accessRevoked) return
         val edit = history.undo() ?: return
-        applyEdit(repository, edit.before.map { it.withLastModified(ICalDateTime.nowUtc()) })
+        repository.apply(edit.inverse().stamped(ICalDateTime.nowUtc()))
+        afterEdit()
     }
 
     fun redo() {
         val repository = repository ?: return
         if (accessRevoked) return
         val edit = history.redo() ?: return
-        applyEdit(repository, edit.after.map { it.withLastModified(ICalDateTime.nowUtc()) })
+        repository.apply(edit.stamped(ICalDateTime.nowUtc()))
+        afterEdit()
     }
 
     /** Writes all tasks of the local copy as an iCalendar file to [uri], which the user picked. */
@@ -286,8 +313,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun applyEdit(repository: TaskRepository, changed: List<Task>) {
-        repository.edit(changed)
+    /** Does what the user did, remembers it for undo, and starts syncing it. */
+    private fun applyEdit(repository: TaskRepository, edit: Edit) {
+        history.record(edit)
+        repository.apply(edit)
+        afterEdit()
+    }
+
+    private fun afterEdit() {
+        // An "Undo" offered for an earlier edit no longer means what it says.
+        if (_message.value?.undoable == true) _message.value = null
         updateHistoryState()
         requestSync(force = true)
     }
@@ -410,6 +445,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val notes = buildList {
             if (report.mergedEdits > 0) {
                 add("${report.mergedEdits} offline ${if (report.mergedEdits == 1) "change was" else "changes were"} merged with newer changes from the server")
+            }
+            if (report.restoredDeletions > 0) {
+                add("${report.restoredDeletions} deleted ${if (report.restoredDeletions == 1) "task was" else "tasks were"} kept because ${if (report.restoredDeletions == 1) "it was" else "they were"} changed on the server")
             }
             if (report.discardedEdits > 0) {
                 add("${report.discardedEdits} offline ${if (report.discardedEdits == 1) "change was" else "changes were"} dropped because the task was deleted on the server")

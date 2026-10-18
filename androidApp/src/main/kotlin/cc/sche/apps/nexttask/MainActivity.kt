@@ -31,6 +31,12 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -113,6 +119,9 @@ private fun App(viewModel: AppViewModel) {
                     color = if (it.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f),
                 )
+                if (it.undoable) {
+                    TextButton(onClick = { viewModel.undo(); viewModel.dismissMessage() }) { Text("Undo") }
+                }
                 TextButton(onClick = viewModel::dismissMessage) { Text("Dismiss") }
             }
         }
@@ -146,6 +155,8 @@ private fun App(viewModel: AppViewModel) {
                 onUndo = viewModel::undo,
                 onRedo = viewModel::redo,
                 onSetCompleted = viewModel::setCompleted,
+                onAddTask = viewModel::addTask,
+                onDeleteTask = viewModel::deleteTask,
                 onExport = viewModel::exportTasks,
                 onRefresh = viewModel::refresh,
                 onSignOut = viewModel::signOut,
@@ -328,12 +339,17 @@ private fun TaskTreeScreen(
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onSetCompleted: (uid: String, completed: Boolean) -> Unit,
+    onAddTask: (summary: String, parentUid: String?) -> Unit,
+    onDeleteTask: (uid: String) -> Unit,
     onExport: (Uri) -> Unit,
     onRefresh: () -> Unit,
     onSignOut: () -> Unit,
     onSignInAgain: () -> Unit,
 ) {
     var confirmSignOut by remember { mutableStateOf(false) }
+    var adding by rememberSaveable { mutableStateOf(false) }
+    var addParentUid by rememberSaveable { mutableStateOf<String?>(null) }
+    var confirmDeleteUid by rememberSaveable { mutableStateOf<String?>(null) }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(EXPORT_MIME_TYPE)) { uri ->
         if (uri != null) onExport(uri)
     }
@@ -352,6 +368,34 @@ private fun TaskTreeScreen(
         )
     }
     var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    if (adding) {
+        val parent = addParentUid?.let { uid -> findNode(tasks.active + tasks.completed, uid) }
+        AddTaskDialog(
+            parentName = parent?.task?.summary,
+            onAdd = { summary ->
+                onAddTask(summary, parent?.uid)
+                // A subtask added to a folded task would vanish; show it.
+                parent?.let { collapsed = collapsed - it.uid }
+                adding = false
+            },
+            onDismiss = { adding = false },
+        )
+    }
+    confirmDeleteUid?.let { uid -> findNode(tasks.active + tasks.completed, uid) }?.let { node ->
+        val subtasks = subtreeSize(node) - 1
+        AlertDialog(
+            onDismissRequest = { confirmDeleteUid = null },
+            title = { Text("Delete task?") },
+            text = { Text("“${node.task.summary}” and its $subtasks ${if (subtasks == 1) "subtask" else "subtasks"} will be deleted.") },
+            confirmButton = { TextButton(onClick = { confirmDeleteUid = null; onDeleteTask(node.uid) }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { confirmDeleteUid = null }) { Text("Cancel") } },
+        )
+    }
+    val onAddSubtask = { uid: String -> addParentUid = uid; adding = true }
+    val onDelete = { node: TaskNode ->
+        // Deleting a single task is undoable from the message that follows; a whole subtree asks first.
+        if (node.children.isEmpty()) onDeleteTask(node.uid) else confirmDeleteUid = node.uid
+    }
     var completedSectionOpen by rememberSaveable { mutableStateOf(true) }
     val activeRows = remember(tasks.active, collapsed) { tasks.active.flatMap { visibleRows(it, collapsed) } }
     val completedRows = remember(tasks.completed, collapsed) { tasks.completed.flatMap { visibleRows(it, collapsed) } }
@@ -403,9 +447,11 @@ private fun TaskTreeScreen(
             LazyColumn(
                 // Let the list follow the finger like an overscroll, and ease back on release.
                 Modifier.fillMaxSize().graphicsLayer { translationY = pullState.distanceFraction * pullThresholdPx },
+                // Room below the last task, so the add button never covers it.
+                contentPadding = PaddingValues(bottom = 88.dp),
             ) {
                 if (activeRows.isEmpty() && tasks.completed.isEmpty()) item { Text("No tasks.") }
-                items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed) }
+                items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onDelete) }
                 if (tasks.completed.isNotEmpty()) {
                     item(key = "completed-header") {
                         val count = tasks.completed.size
@@ -426,12 +472,46 @@ private fun TaskTreeScreen(
                         }
                     }
                     if (completedSectionOpen) {
-                        items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed) }
+                        items(completedRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onDelete) }
                     }
+                }
+            }
+            if (!tasks.accessRevoked) {
+                FloatingActionButton(
+                    onClick = { addParentUid = null; adding = true },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "Add task")
                 }
             }
         }
     }
+}
+
+@Composable
+private fun AddTaskDialog(parentName: String?, onAdd: (String) -> Unit, onDismiss: () -> Unit) {
+    var summary by rememberSaveable { mutableStateOf("") }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    val submit = { if (summary.isNotBlank()) onAdd(summary) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (parentName == null) "New task" else "New subtask of “$parentName”") },
+        text = {
+            OutlinedTextField(
+                value = summary,
+                onValueChange = { summary = it },
+                label = { Text("Task") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { submit() }),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+            )
+        },
+        confirmButton = { TextButton(onClick = { submit() }, enabled = summary.isNotBlank()) { Text("Add") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -479,6 +559,8 @@ private fun TaskRow(
     readOnly: Boolean,
     onSetCompleted: (uid: String, completed: Boolean) -> Unit,
     onToggleCollapsed: (uid: String) -> Unit,
+    onAddSubtask: (uid: String) -> Unit,
+    onDelete: (TaskNode) -> Unit,
 ) {
     val task = row.node.task
     val hasChildren = row.node.children.isNotEmpty()
@@ -509,6 +591,18 @@ private fun TaskRow(
                 Text("Completed $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }
         }
+        if (!readOnly) {
+            Box {
+                var menuOpen by remember { mutableStateOf(false) }
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "Task actions")
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(text = { Text("Add subtask") }, onClick = { menuOpen = false; onAddSubtask(task.uid) })
+                    DropdownMenuItem(text = { Text("Delete") }, onClick = { menuOpen = false; onDelete(row.node) })
+                }
+            }
+        }
     }
 }
 
@@ -531,6 +625,17 @@ private fun FoldIcon(expanded: Boolean) {
         modifier = Modifier.size(24.dp),
     )
 }
+
+private fun findNode(forest: List<TaskNode>, uid: String): TaskNode? {
+    for (node in forest) {
+        if (node.uid == uid) return node
+        findNode(node.children, uid)?.let { return it }
+    }
+    return null
+}
+
+/** The task itself plus everything below it. */
+private fun subtreeSize(node: TaskNode): Int = 1 + node.children.sumOf(::subtreeSize)
 
 private data class VisibleRow(val node: TaskNode, val depth: Int)
 

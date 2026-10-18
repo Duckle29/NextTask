@@ -88,6 +88,7 @@ class FakeCalDavServer {
             }
             "REPORT" -> if ("sync-collection" in body) syncCollection(body) else multiget(body)
             "PUT" -> put(request, body)
+            "DELETE" -> delete(request)
             else -> error("Unexpected ${request.method} $path")
         }
     }
@@ -117,6 +118,17 @@ class FakeCalDavServer {
                     "</d:response>"
             },
         )
+    }
+
+    private fun MockRequestHandleScope.delete(request: HttpRequestData): HttpResponseData {
+        val href = request.url.encodedPath
+        val existing = resources[href] ?: return respond("", HttpStatusCode.NotFound)
+        val ifMatch = request.headers[HttpHeaders.IfMatch]
+        if (ifMatch != null && existing.etag != ifMatch) return respond("", HttpStatusCode.PreconditionFailed)
+        resources.remove(href)
+        version++
+        deletions += href to version
+        return respond("", HttpStatusCode.NoContent)
     }
 
     private fun MockRequestHandleScope.put(request: HttpRequestData, body: String): HttpResponseData {

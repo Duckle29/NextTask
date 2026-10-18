@@ -1,7 +1,20 @@
 package cc.sche.apps.nexttask.model
 
-/** One user action, as the tasks it touched before and after. Undo restores [before], redo restores [after]. */
-data class Edit(val before: List<Task>, val after: List<Task>)
+/**
+ * What happened to one task: it was created ([before] is null), deleted ([after] is null) or changed.
+ * Undoing swaps the two sides.
+ */
+data class TaskChange(val before: Task?, val after: Task?)
+
+/** One user action, as the changes it made to tasks. */
+data class Edit(val changes: List<TaskChange>) {
+
+    /** The edit that reverses this one: it restores every task to how it was before. */
+    fun inverse() = Edit(changes.map { TaskChange(before = it.after, after = it.before) })
+
+    /** The same edit with every resulting task marked as modified at [now]. */
+    fun stamped(now: String) = Edit(changes.map { it.copy(after = it.after?.withLastModified(now)) })
+}
 
 /** Bounded undo/redo stacks. Recording a new edit discards anything that could be redone. */
 class EditHistory(private val limit: Int = DEFAULT_LIMIT) {

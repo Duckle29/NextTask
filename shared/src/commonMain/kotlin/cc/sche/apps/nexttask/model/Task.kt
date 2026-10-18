@@ -48,6 +48,18 @@ data class Task(
             Property("VERSION", "2.0"),
             Property("PRODID", "-//NextTask//EN"),
         )
+
+        /**
+         * A new, open task. Like other clients it gets no manual sort order, so it is listed alphabetically
+         * among its siblings. DTSTAMP is mandatory in iCalendar; CREATED and LAST-MODIFIED are what other
+         * clients show and sort by.
+         */
+        fun create(uid: String, summary: String, parentUid: String?, now: String) = Task(
+            uid = uid,
+            summary = summary,
+            parentUid = parentUid,
+            unmapped = listOf(Property("DTSTAMP", now), Property("CREATED", now), Property("LAST-MODIFIED", now)),
+        )
     }
 }
 

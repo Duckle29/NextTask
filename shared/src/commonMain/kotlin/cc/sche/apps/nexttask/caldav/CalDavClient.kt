@@ -32,6 +32,10 @@ data class TaskCalendar(
     val syncToken: String?,
 )
 
+/** The resource a task is stored in. The UID is escaped as one path segment, so it can never leave the calendar. */
+internal fun taskHref(calendarHref: String, uid: String): String =
+    calendarHref.trimEnd('/') + "/" + uid.encodeURLPathPart() + ".ics"
+
 /** A task as stored on the server. [etag] must be sent back on update/delete to detect concurrent edits. */
 data class RemoteTask(val href: String, val etag: String, val task: Task)
 
@@ -130,7 +134,7 @@ class CalDavClient(
      * Throws [ConflictException] if the task exists already (create) or changed on the server (update).
      */
     suspend fun put(calendarHref: String, task: Task, href: String? = null, etag: String? = null): PutResult {
-        val target = href ?: (calendarHref.trimEnd('/') + "/" + task.uid.encodeURLPathPart() + ".ics")
+        val target = href ?: taskHref(calendarHref, task.uid)
         val response = client.put(resolve(target)) {
             authorize()
             contentType(ICS)
@@ -141,10 +145,15 @@ class CalDavClient(
         return PutResult(target, response.headers[HttpHeaders.ETag])
     }
 
-    suspend fun delete(href: String, etag: String) {
+    /**
+     * Deletes the resource at [href]. With an [etag] the server refuses (HTTP 412, [ConflictException]) if the
+     * task changed since; without one, which only happens if the server never reported the ETag, it is
+     * deleted whatever its state.
+     */
+    suspend fun delete(href: String, etag: String?) {
         val response = client.delete(resolve(href)) {
             authorize()
-            header(HttpHeaders.IfMatch, etag)
+            if (etag != null) header(HttpHeaders.IfMatch, etag)
         }
         // 404: already gone, which is what the caller wanted.
         if (response.status != HttpStatusCode.NotFound) response.requireSuccess()
