@@ -19,7 +19,7 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.URLBuilder
 import io.ktor.http.contentType
-import io.ktor.http.encodeURLPath
+import io.ktor.http.encodeURLPathPart
 import io.ktor.http.encodedPath
 import io.ktor.http.isSuccess
 import io.ktor.http.takeFrom
@@ -50,6 +50,11 @@ class UnauthorizedException : DavException(401, "Invalid or revoked credentials"
 /** The resource changed on the server since [CalDavClient] last saw its ETag (or already exists). */
 class ConflictException(status: Int) : DavException(status, "Resource was modified on the server")
 
+/**
+ * CalDAV access to the account in [credentials]. Every request goes to its server URL, with its scheme:
+ * hrefs from server responses only ever replace the path, so they cannot move requests (and the
+ * credentials sent with them) to another host or to plain HTTP.
+ */
 class CalDavClient(
     private val client: HttpClient,
     private val credentials: Credentials,
@@ -125,7 +130,7 @@ class CalDavClient(
      * Throws [ConflictException] if the task exists already (create) or changed on the server (update).
      */
     suspend fun put(calendarHref: String, task: Task, href: String? = null, etag: String? = null): PutResult {
-        val target = href ?: (calendarHref.trimEnd('/') + "/" + task.uid.encodeURLPath() + ".ics")
+        val target = href ?: (calendarHref.trimEnd('/') + "/" + task.uid.encodeURLPathPart() + ".ics")
         val response = client.put(resolve(target)) {
             authorize()
             contentType(ICS)

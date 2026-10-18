@@ -175,6 +175,19 @@ class CalDavClientTest {
     }
 
     @Test
+    fun createEscapesSlashesInUid() = runTest {
+        var path = ""
+        val client = client { r ->
+            path = r.url.encodedPath
+            respond("", HttpStatusCode.Created)
+        }
+
+        client.put("/c/", Task(uid = "../../other/x", summary = "S"))
+
+        assertEquals("/c/..%2F..%2Fother%2Fx.ics", path)
+    }
+
+    @Test
     fun updateUsesIfMatchAndConflictIsReported() = runTest {
         var ifMatch: String? = null
         val client = client { r ->
