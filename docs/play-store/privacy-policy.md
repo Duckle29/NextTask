@@ -56,4 +56,4 @@ If this policy changes, the new version will be published at the same address wi
 
 ## Contact
 
-[your contact email]
+Questions about this policy or the app: [hi@sche.cc](mailto:hi@sche.cc)

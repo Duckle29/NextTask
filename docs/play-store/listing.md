@@ -43,7 +43,7 @@ Source code: https://github.com/Duckle29/NextTask
 |---|---|
 | Category | Productivity |
 | Website | https://github.com/Duckle29/NextTask |
-| Privacy policy | [`privacy-policy.md`](privacy-policy.md), published at a public URL |
+| Privacy policy | <https://duckle29.github.io/NextTask/privacy-policy.html> (from [`privacy-policy.md`](privacy-policy.md)) |
 
 ## Graphics
 

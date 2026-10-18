@@ -14,7 +14,7 @@ network traffic goes to the Nextcloud server the user types in, which belongs to
 
 The form then asks for nothing else (no encryption or deletion questions apply), but it still wants:
 
-- **Privacy policy URL**: where you host [`privacy-policy.md`](privacy-policy.md).
+- **Privacy policy URL**: <https://duckle29.github.io/NextTask/privacy-policy.html> (published from [`privacy-policy.md`](privacy-policy.md) by the Pages workflow).
 
 ### If Google disagrees
 
