@@ -6,7 +6,7 @@ plugins {
 
 kotlin {
     androidLibrary {
-        namespace = "cc.mikkel.nexttask.shared"
+        namespace = "cc.sche.apps.nexttask.shared"
         compileSdk = 37
         minSdk = 26
     }

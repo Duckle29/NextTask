@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "cc.mikkel.nexttask"
+    namespace = "cc.sche.apps.nexttask"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "cc.mikkel.nexttask"
+        applicationId = "cc.sche.apps.nexttask"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
