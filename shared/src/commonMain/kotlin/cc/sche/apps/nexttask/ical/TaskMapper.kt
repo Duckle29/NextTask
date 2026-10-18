@@ -45,6 +45,16 @@ object TaskMapper {
     }
 
     fun toIcs(task: Task): String {
+        val calendar = Component(
+            name = "VCALENDAR",
+            properties = task.calendarProperties,
+            components = task.calendarComponents + toVTodo(task),
+        )
+        return ICalWriter.write(calendar)
+    }
+
+    /** The VTODO component for [task], with the properties this app does not model written back unchanged. */
+    fun toVTodo(task: Task): Component {
         val properties = buildList {
             add(Property(UID, task.uid))
             add(Property(SUMMARY, ICalText.escape(task.summary)))
@@ -57,12 +67,7 @@ object TaskMapper {
             task.sortOrder?.let { add(Property(SORT_ORDER, it.toString())) }
             addAll(task.unmapped)
         }
-        val calendar = Component(
-            name = "VCALENDAR",
-            properties = task.calendarProperties,
-            components = task.calendarComponents + Component("VTODO", properties),
-        )
-        return ICalWriter.write(calendar)
+        return Component("VTODO", properties)
     }
 
     private fun Property.isParentRelation(): Boolean =
