@@ -43,8 +43,15 @@ it, installed copies can no longer be updated, only reinstalled.
 
 ```sh
 keytool -genkeypair -v -keystore nexttask-release.jks -alias nexttask \
-  -keyalg RSA -keysize 4096 -validity 36500
+  -keyalg RSA -keysize 4096 -validity 36500 -dname "CN=NextTask"
 ```
+
+`-dname` answers the questions `keytool` would otherwise ask (name, organisation, city, ...). Android does
+not check them, and `Unknown` would be fine too, but they are written into the certificate that ships
+inside every APK, so only put in what you are happy to make public. `keytool` still asks for a password.
+
+The keystore is a PKCS12 file, which has a single password for the file and the key. Use the **same value**
+for `ANDROID_KEYSTORE_PASSWORD` and `ANDROID_KEY_PASSWORD` below, or signing fails.
 
 Keep the file out of the repository.
 
