@@ -18,3 +18,8 @@ Requires a JDK 17+ (not just a JRE) and, for the Android app, the Android SDK (`
 ```
 
 The iOS targets only build on macOS.
+
+## Releases
+
+Pushing a version tag from `main` (`git tag -a v1.2.3 -m "..." && git push origin v1.2.3`) builds, signs and
+publishes a release. See [docs/releasing.md](docs/releasing.md) for the one-time setup.
