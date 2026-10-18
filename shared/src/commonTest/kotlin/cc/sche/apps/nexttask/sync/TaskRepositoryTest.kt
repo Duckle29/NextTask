@@ -84,6 +84,22 @@ class TaskRepositoryTest {
     }
 
     @Test
+    fun ourOwnUploadComingBackIsNotReportedAsAServerChange() = runTest {
+        server.write(task("a"))
+        val repo = repository().also { it.sync() }
+
+        repo.edit(server.calendarHref, listOf(done(task("a"))))
+        repo.sync(full = false)
+        // Edited again before the next pull, which returns the version uploaded above.
+        repo.edit(server.calendarHref, listOf(task("a")))
+        val report = repo.sync(full = false)
+
+        assertEquals(0, report.mergedEdits)
+        assertEquals(TaskStatus.NeedsAction, server.task("a")?.status)
+        assertEquals(0, repo.snapshot.value.pendingChanges)
+    }
+
+    @Test
     fun offlineEditAndServerEditToDifferentFieldsAreBothKept() = runTest {
         server.write(task("a", "Old"))
         val repo = repository()

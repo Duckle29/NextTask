@@ -63,6 +63,8 @@ internal fun CalendarSnapshot.applyPull(result: SyncResult, fullListing: Boolean
                 if (local.task == remote.task) StoredTask(remote.href, remote.etag, remote.task)
                 else StoredTask(remote.href, remote.etag, local.task, base = remote.task)
             base == null -> StoredTask(remote.href, remote.etag, remote.task)
+            // The version we uploaded ourselves, coming back: the local edits are simply newer still.
+            local.etag != null && local.etag == remote.etag -> local.copy(href = remote.href)
             else -> {
                 val mergedTask = mergeTask(base, local.task, remote.task)
                 if (mergedTask == remote.task) {
