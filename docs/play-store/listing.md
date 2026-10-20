@@ -45,8 +45,8 @@ Source code: https://github.com/Duckle29/NextTask
 | Field | Value |
 |---|---|
 | Category | Productivity |
-| Website | https://duckle29.github.io/NextTask/ |
-| Privacy policy | <https://duckle29.github.io/NextTask/privacy-policy.html> (from [`privacy-policy.md`](privacy-policy.md)) |
+| Website | https://nexttask.sche.cc/ |
+| Privacy policy | <https://nexttask.sche.cc/privacy-policy.html> (from [`privacy-policy.md`](privacy-policy.md)) |
 
 ## Graphics
 
