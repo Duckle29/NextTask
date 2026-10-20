@@ -17,6 +17,7 @@ NextTask brings your Nextcloud Tasks to your phone, with subtasks nested as deep
 
 FEATURES
 • Subtasks within subtasks, with fold and unfold
+• Long-press and drag to reorder tasks, or to move them into and out of subtasks
 • All your task lists in a side drawer, one swipe away; create and delete lists, even offline
 • Check off, add and delete tasks and subtasks, with undo and redo
 • Due dates, with overdue tasks in red

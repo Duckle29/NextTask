@@ -113,6 +113,16 @@ import androidx.compose.material.icons.outlined.Notifications
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import cc.sche.apps.nexttask.tree.TaskNode
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.lazy.LazyItemScope
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
 
@@ -183,6 +193,7 @@ private fun App(viewModel: AppViewModel) {
             onSetCompleted = viewModel::setCompleted,
             onAddTask = viewModel::addTask,
             onDeleteTask = viewModel::deleteTask,
+            onMoveTask = viewModel::moveTask,
             onSetDue = viewModel::setDue,
             onExport = viewModel::exportTasks,
             onRefresh = viewModel::refresh,
@@ -500,6 +511,7 @@ private fun TaskTreeScreen(
     onSetCompleted: (uid: String, completed: Boolean) -> Unit,
     onAddTask: (summary: String, parentUid: String?) -> Unit,
     onDeleteTask: (uid: String) -> Unit,
+    onMoveTask: (uid: String, parentUid: String?, afterUid: String?) -> Unit,
     onSetDue: (uid: String, due: ICalDate?) -> Unit,
     onExport: (Uri) -> Unit,
     onRefresh: () -> Unit,
@@ -592,6 +604,42 @@ private fun TaskTreeScreen(
     val activeRows = remember(tasks.active, collapsed) { tasks.active.flatMap { visibleRows(it, collapsed) } }
     val completedRows = remember(tasks.completed, collapsed) { tasks.completed.flatMap { visibleRows(it, collapsed) } }
     val toggleCollapsed = { uid: String -> collapsed = collapsed.toggle(uid) }
+    val listState = rememberLazyListState()
+
+    // Long-pressing an open task picks it up, with its subtasks, to move it elsewhere in the list.
+    var drag by remember { mutableStateOf<TaskDrag?>(null) }
+    val haptics = LocalHapticFeedback.current
+    val indentPx = with(LocalDensity.current) { SUBTASK_INDENT.toPx() }
+    // Lambdas rather than local functions: the compiler keeps a reference to a local function from the first
+    // composition, rows and all, while a lambda is renewed whenever what it captures changes.
+    val startDrag: (Offset) -> TaskDrag? = startDrag@{ position ->
+        val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { position.y.toInt() in it.offset until it.offset + it.size }
+            ?: return@startDrag null
+        val index = activeRows.indexOfFirst { it.node.uid == item.key }
+        if (index < 0) return@startDrag null
+        val row = activeRows[index]
+        val moving = row.node.flatten().map { it.task.uid }.toSet()
+        val remaining = activeRows.filterNot { it.node.uid in moving }
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        TaskDrag(row, remaining, index, item.size, position.y - item.offset, position.y, indentPx).also { drag = it }
+    }
+    val drop: (TaskDrag) -> Unit = drop@{ held ->
+        drag = null
+        if (!held.moves) return@drop
+        val target = held.target
+        // A task dropped into a folded one would vanish; show it.
+        target.parentUid?.let { collapsed = collapsed - it }
+        onMoveTask(held.row.node.uid, target.parentUid, target.afterUid)
+    }
+    val currentStartDrag = rememberUpdatedState(startDrag)
+    val currentDrop = rememberUpdatedState(drop)
+    val currentCancelDrag = rememberUpdatedState { drag = null }
+    FollowDrag(drag, listState)
+    val activeRow: @Composable LazyItemScope.(VisibleRow) -> Unit = {
+        // Rows slide aside for a dragged task; nothing fades, so a dropped task does not flicker into place.
+        val modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null)
+        TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onEditDue, onRemoveDue, onDelete, modifier)
+    }
     val pullState = rememberPullToRefreshState()
     val pullThresholdPx = with(LocalDensity.current) { PullToRefreshDefaults.PositionalThreshold.toPx() }
 
@@ -603,6 +651,8 @@ private fun TaskTreeScreen(
     // Swiping right anywhere on the screen opens the drawer, swiping left closes it.
     ModalNavigationDrawer(
         drawerState = drawerState,
+        // Moving a dragged task sideways changes its level; it must not pull the drawer open.
+        gesturesEnabled = drag == null,
         drawerContent = {
             ListsDrawer(
                 tasks = tasks,
@@ -640,12 +690,28 @@ private fun TaskTreeScreen(
             ) {
                 LazyColumn(
                     // Let the list follow the finger like an overscroll, and ease back on release.
-                    Modifier.fillMaxSize().graphicsLayer { translationY = pullState.distanceFraction * pullThresholdPx },
+                    Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { translationY = pullState.distanceFraction * pullThresholdPx }
+                        .longPressDragging(
+                            enabled = !tasks.accessRevoked,
+                            onStart = currentStartDrag,
+                            onDrop = currentDrop,
+                            onCancel = currentCancelDrag,
+                        ),
+                    state = listState,
                     // Room below the last task, so the add button never covers it.
                     contentPadding = PaddingValues(bottom = 88.dp),
                 ) {
                     if (activeRows.isEmpty() && tasks.completed.isEmpty()) item { Text("No tasks.") }
-                    items(activeRows, key = { it.node.uid }) { TaskRow(it, collapsed, tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onEditDue, onRemoveDue, onDelete) }
+                    val held = drag
+                    if (held == null) {
+                        items(activeRows, key = { it.node.uid }) { activeRow(it) }
+                    } else {
+                        items(held.remaining.subList(0, held.gap), key = { it.node.uid }) { activeRow(it) }
+                        item(key = DROP_GAP_KEY) { DropGap(held, Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null)) }
+                        items(held.remaining.subList(held.gap, held.remaining.size), key = { it.node.uid }) { activeRow(it) }
+                    }
                     if (tasks.completed.isNotEmpty()) {
                         item(key = "completed-header") {
                             val count = tasks.completed.size
@@ -676,6 +742,16 @@ private fun TaskTreeScreen(
                         modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
                     ) {
                         Icon(Icons.Default.Add, contentDescription = "Add task")
+                    }
+                }
+                drag?.let { held ->
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        shadowElevation = 6.dp,
+                        modifier = Modifier.fillMaxWidth().offset { IntOffset(held.dx.roundToInt(), held.top.roundToInt()) },
+                    ) {
+                        // Above everything else, add button included. Its subtasks travel along folded up.
+                        TaskRow(held.row, setOf(held.row.node.uid), tasks.accessRevoked, onSetCompleted, toggleCollapsed, onAddSubtask, onEditDue, onRemoveDue, onDelete)
                     }
                 }
             }
@@ -852,11 +928,12 @@ private fun TaskRow(
     onEditDue: (uid: String) -> Unit,
     onRemoveDue: (uid: String) -> Unit,
     onDelete: (TaskNode) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val task = row.node.task
     val hasChildren = row.node.children.isNotEmpty()
     Row(
-        Modifier.fillMaxWidth().padding(start = (row.depth * 24).dp),
+        modifier.fillMaxWidth().padding(start = SUBTASK_INDENT * row.depth),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -932,6 +1009,21 @@ private fun DueLine(task: Task) {
 
 private val FOLD_TARGET_SIZE = 32.dp
 
+private const val DROP_GAP_KEY = "drop-gap"
+
+/** The empty slot a dragged task would drop into, indented to the level it would land at. */
+@Composable
+private fun DropGap(drag: TaskDrag, modifier: Modifier) {
+    val height = with(LocalDensity.current) { drag.rowHeight.toDp() }
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(height)
+            .padding(start = SUBTASK_INDENT * drag.target.depth, top = 4.dp, bottom = 4.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.shapes.small),
+    )
+}
+
 private const val EXPORT_MIME_TYPE = "text/calendar"
 
 /** `<list name>-2026-10-18.ics`, without characters that file systems reject. */
@@ -960,11 +1052,5 @@ private fun findNode(forest: List<TaskNode>, uid: String): TaskNode? {
 
 /** The task itself plus everything below it. */
 private fun subtreeSize(node: TaskNode): Int = 1 + node.children.sumOf(::subtreeSize)
-
-private data class VisibleRow(val node: TaskNode, val depth: Int)
-
-private fun visibleRows(node: TaskNode, collapsed: Set<String>, depth: Int = 0): List<VisibleRow> =
-    listOf(VisibleRow(node, depth)) +
-        if (node.uid in collapsed) emptyList() else node.children.flatMap { visibleRows(it, collapsed, depth + 1) }
 
 private fun Set<String>.toggle(uid: String): Set<String> = if (uid in this) this - uid else this + uid

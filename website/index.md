@@ -18,6 +18,7 @@ nested as deep as you need and full use without a connection.
 ## Features
 
 - Subtasks within subtasks, with fold and unfold
+- Long-press and drag to reorder tasks, or to move them into and out of subtasks
 - All your task lists in a side drawer, one swipe away; create and delete lists, even offline
 - Check off, add and delete tasks and subtasks, with undo and redo
 - Due dates, with overdue tasks in red

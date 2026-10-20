@@ -30,6 +30,32 @@ object TaskHierarchy {
         return listOf(node.task.copy(parentUid = newParentUid))
     }
 
+    /**
+     * Moves [uid], with its subtasks, under [newParentUid] (null for top level), right after the sibling
+     * [afterUid] (null to come first). Like Nextcloud Tasks, it then numbers the siblings there 0, 1, 2, … in
+     * [Task.sortOrder]; only tasks whose parent or number changes are returned. Siblings are taken in the order
+     * of [forest], so at top level it holds just the roots that can be reordered (the open ones).
+     * Refuses a cycle, an unknown parent, and an [afterUid] that is not a sibling there.
+     */
+    fun move(forest: List<TaskNode>, uid: String, newParentUid: String?, afterUid: String?): List<Task> {
+        val node = find(forest, uid) ?: return emptyList()
+        val siblings = if (newParentUid == null) {
+            forest
+        } else {
+            if (find(listOf(node), newParentUid) != null) return emptyList()
+            find(forest, newParentUid)?.children ?: return emptyList()
+        }
+        val order = siblings.map { it.task }.filterNot { it.uid == uid }.toMutableList()
+        val position = if (afterUid == null) 0 else order.indexOfFirst { it.uid == afterUid } + 1
+        if (afterUid != null && position == 0) return emptyList()
+        order.add(position, node.task)
+        return order.mapIndexedNotNull { index, task ->
+            // Only the moved task changes parent: a sibling shown at top level may name a parent this list lacks.
+            val placed = if (task.uid == uid) task.copy(parentUid = newParentUid, sortOrder = index) else task.copy(sortOrder = index)
+            placed.takeIf { it != task }
+        }
+    }
+
     private fun find(forest: List<TaskNode>, uid: String): TaskNode? {
         for (node in forest) {
             if (node.uid == uid) return node

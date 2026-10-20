@@ -62,6 +62,61 @@ class TaskTreeTest {
         assertTrue(TaskHierarchy.reparent(forest, "a", "c").isEmpty())
         assertTrue(TaskHierarchy.reparent(forest, "a", "a").isEmpty())
     }
+
+    @Test
+    fun moveNumbersSiblingsInTheirNewOrder() {
+        val forest = TaskTree.build(listOf(task("a"), task("b"), task("c")))
+        val changed = TaskHierarchy.move(forest, "c", null, "a")
+        assertEquals(listOf("a" to 0, "c" to 1, "b" to 2), changed.map { it.uid to it.sortOrder })
+        assertEquals(listOf("a", "c", "b"), TaskTree.build(applied(forest, changed)).map { it.uid })
+    }
+
+    @Test
+    fun moveOnlyReturnsTasksThatChange() {
+        val forest = TaskTree.build(listOf(task("a", order = 0), task("b", order = 1), task("c", order = 2), task("d", order = 3)))
+        assertEquals(listOf("c" to 1, "b" to 2), TaskHierarchy.move(forest, "c", null, "a").map { it.uid to it.sortOrder })
+    }
+
+    @Test
+    fun moveFirstNeedsNoSiblingToFollow() {
+        val forest = TaskTree.build(listOf(task("a", order = 0), task("b", order = 1)))
+        assertEquals(listOf("b" to 0, "a" to 1), TaskHierarchy.move(forest, "b", null, null).map { it.uid to it.sortOrder })
+    }
+
+    @Test
+    fun moveIntoAndOutOfSubtasks() {
+        val forest = TaskTree.build(listOf(task("a"), task("a1", "a", order = 0), task("b")))
+        val into = TaskHierarchy.move(forest, "b", "a", "a1").single()
+        assertEquals("a" to 1, into.parentUid to into.sortOrder)
+
+        val outOf = TaskHierarchy.move(forest, "a1", null, "a")
+        assertEquals(
+            listOf(Triple("a", null, 0), Triple("a1", null, 1), Triple("b", null, 2)),
+            outOf.map { Triple(it.uid, it.parentUid, it.sortOrder) },
+        )
+    }
+
+    @Test
+    fun moveKeepsTheParentOfOtherSiblings() {
+        // "o" names a parent that is not in the list, so it is shown at top level; renumbering must not change that.
+        val forest = TaskTree.build(listOf(task("o", "elsewhere"), task("a")))
+        val changed = TaskHierarchy.move(forest, "a", null, null)
+        assertEquals("elsewhere", changed.single { it.uid == "o" }.parentUid)
+    }
+
+    @Test
+    fun moveRefusesCyclesUnknownParentsAndStrangers() {
+        val forest = TaskTree.build(listOf(task("a"), task("b", "a"), task("c")))
+        assertTrue(TaskHierarchy.move(forest, "a", "b", null).isEmpty())
+        assertTrue(TaskHierarchy.move(forest, "a", "a", null).isEmpty())
+        assertTrue(TaskHierarchy.move(forest, "c", "missing", null).isEmpty())
+        assertTrue(TaskHierarchy.move(forest, "c", "a", "a").isEmpty())
+    }
+
+    private fun applied(forest: List<TaskNode>, changed: List<Task>): List<Task> {
+        val byUid = changed.associateBy { it.uid }
+        return forest.flatMap { it.flatten() }.map { byUid[it.task.uid] ?: it.task }
+    }
 }
 
 class TaskTreeCompletionOrderTest {

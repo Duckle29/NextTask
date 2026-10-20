@@ -29,6 +29,7 @@ import cc.sche.apps.nexttask.sync.CalendarSnapshot
 import cc.sche.apps.nexttask.sync.SyncReport
 import cc.sche.apps.nexttask.sync.TaskRepository
 import cc.sche.apps.nexttask.tree.CompletedOrder
+import cc.sche.apps.nexttask.tree.TaskHierarchy
 import cc.sche.apps.nexttask.tree.TaskNode
 import cc.sche.apps.nexttask.tree.TaskTree
 import io.ktor.client.HttpClient
@@ -344,6 +345,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val task = list.tasks[uid]?.takeUnless { it.isDeleted }?.task ?: return
         if (task.due == due) return
         applyEdit(repository, list.href, Edit(listOf(TaskChange(before = task, after = task.copy(due = due).withLastModified(ICalDateTime.nowUtc())))))
+    }
+
+    /**
+     * Moves an open task, with its subtasks, under [parentUid] (null for top level) right after the sibling
+     * [afterUid] (null to come first). Undo puts it back.
+     */
+    fun moveTask(uid: String, parentUid: String?, afterUid: String?) {
+        val (repository, list) = editable() ?: return
+        val active = TaskTree.build(list.currentTasks, _completedOrder.value).filterNot { it.task.isCompleted }
+        val changed = TaskHierarchy.move(active, uid, parentUid, afterUid)
+        if (changed.isEmpty()) return
+        val now = ICalDateTime.nowUtc()
+        applyEdit(repository, list.href, Edit(changed.map { TaskChange(before = list.tasks.getValue(it.uid).task, after = it.withLastModified(now)) }))
     }
 
     /** Deletes a task together with all its subtasks. Undo brings them back. */
