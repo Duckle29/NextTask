@@ -40,7 +40,7 @@ expected rating is the lowest one (everyone).
 
 | Form | Answer |
 |---|---|
-| Target audience and content | 18+ (not designed for children) |
+| Target audience and content | 13–15, 16–17 and 18+ (not directed at children under 13; see the privacy policy) |
 | Ads | No ads |
 | App access | Restricted, because a Nextcloud server is needed: give the reviewers a test server and account |
 | News app / government app / financial features / health features | No |

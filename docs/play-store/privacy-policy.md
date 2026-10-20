@@ -1,6 +1,6 @@
 # NextTask privacy policy
 
-*Last updated: 19 October 2026*
+*Last updated: 20 October 2026*
 
 NextTask is an app for reading and editing the tasks stored on **your own Nextcloud server**. It is made by
 Mikkel Jeppesen ("I"). I do not run any server for the app, and I do not receive any data from it.
@@ -51,7 +51,7 @@ control. NextTask is not affiliated with Nextcloud GmbH.
 
 ## Children
 
-The app is not meant for children, and I do not knowingly collect any data from anyone.
+NextTask is not directed at children under 13. It collects no personal data from anyone, children included.
 
 ## Changes
 
