@@ -132,9 +132,55 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"
 
+  smoke-test:
+    name: Smoke test the signed APK
+    needs: [verify, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VERSION_NAME: ${{ needs.verify.outputs.version-name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Accept Android SDK licenses
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$sdkmanager" --licenses < <(yes) > /dev/null
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: release
+
+      # Hardware acceleration for the emulator, which is too slow to be useful without it.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Signs the exact APK about to be published in to a fake Nextcloud and checks that edits reach it.
+      - name: Run the smoke test on an emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: scripts/smoke-test.sh "release/NextTask-$VERSION_NAME.apk"
+
   publish:
     name: Publish the release
-    needs: [verify, build]
+    needs: [verify, build, smoke-test]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

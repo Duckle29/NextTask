@@ -36,7 +36,7 @@ jobs:
           "$sdkmanager" --licenses < <(yes) > /dev/null
 
       - name: Test, lint and build
-        run: ./gradlew :shared:jvmTest :androidApp:lintDebug :androidApp:assembleDebug --stacktrace
+        run: ./gradlew :shared:jvmTest :androidApp:lintDebug :androidApp:assembleDebug :smokeTest:assembleDebug --stacktrace
 
       - name: Keep reports of a failed run
         if: failure()

@@ -17,3 +17,4 @@ rootProject.name = "NextTask"
 
 include(":shared")
 include(":androidApp")
+include(":smokeTest")

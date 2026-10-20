@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- To approve the login and read what reached the fake Nextcloud, at http://localhost:8099 (adb reverse). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- To find the app's launch intent. -->
+    <queries>
+        <package android:name="cc.sche.apps.nexttask" />
+    </queries>
+
+    <application android:usesCleartextTraffic="true" />
+</manifest>

@@ -34,6 +34,16 @@ Builds that do not come from a tag are marked `0.0.0-dev`.
    unmerged branch is rejected.
 3. The tests pass, the release is **signed** (the workflow fails if the signing key is missing), and the APK
    really carries the version the tag asked for.
+4. **The signed APK works** on an Android emulator: the smoke test (`smokeTest/`) signs it in to a fake
+   Nextcloud (`tools/fake-nextcloud/`), adds a task, ticks it off and drags another into a sub-list, and checks
+   that each change reaches the server. This catches what the unit tests cannot, such as R8 shrinking away
+   something the app needs. Nothing is published unless it passes.
+
+   To run it yourself, on an emulator (it replaces the app there, data included):
+
+   ```sh
+   scripts/smoke-test.sh path/to/NextTask.apk
+   ```
 
 ## One-time setup
 
