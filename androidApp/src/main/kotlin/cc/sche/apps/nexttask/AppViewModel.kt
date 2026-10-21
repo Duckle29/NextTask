@@ -36,6 +36,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpRequestRetry
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -152,8 +153,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var syncAgainFull = false
     private var lastSyncFinished = NEVER
 
-    /** Parent of all work for the signed-in account, so signing out stops it in one go. */
-    private val accountWork = SupervisorJob(viewModelScope.coroutineContext.job)
+    /**
+     * All work for the signed-in account runs here, so signing out stops it in one go. A child of
+     * [viewModelScope], so it also ends with the ViewModel; one failed job leaves the others running.
+     */
+    private val accountScope = CoroutineScope(viewModelScope.coroutineContext + SupervisorJob(viewModelScope.coroutineContext.job))
 
     /** Disk writes happen one at a time and in order, so a late save can never undo a sign-out's cleanup. */
     private val disk = Dispatchers.IO.limitedParallelism(1)
@@ -184,7 +188,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         loginJob?.cancel()
-        loginJob = viewModelScope.launch(accountWork) {
+        loginJob = accountScope.launch {
             _state.value = AppState.Loading
             try {
                 val flow = LoginFlowV2(http, userAgent = "NextTask Android")
@@ -286,7 +290,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteList(href: String) {
         val repository = repository?.takeUnless { accessRevoked } ?: return
         val name = repository.snapshot.value.calendar(href)?.name ?: return
-        viewModelScope.launch(accountWork) {
+        accountScope.launch {
             try {
                 repository.deleteList(href)
                 histories.remove(href)
@@ -441,7 +445,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * copy that belongs to another account (or an older format) is not used.
      */
     private fun startAccount(credentials: Credentials) {
-        viewModelScope.launch(accountWork) {
+        accountScope.launch {
             val saved = withContext(disk) { snapshotStore.load() }
                 ?.takeIf { it.belongsTo(credentials.serverUrl, credentials.loginName) }
             val repository = TaskRepository(
@@ -482,7 +486,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return running
         }
         if (!force && SystemClock.elapsedRealtime() - lastSyncFinished < RECENT_SYNC_MS) return null
-        val job = viewModelScope.launch(accountWork) {
+        val job = accountScope.launch {
             var nextFull = full
             do {
                 syncAgain = false
@@ -555,7 +559,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Stops all work for the signed-in account, drops its credentials and shows the sign-in screen. */
     private fun forgetAccount(deleteLocalCopy: Boolean) {
-        accountWork.cancelChildren()
+        accountScope.coroutineContext.cancelChildren()
         credentialStore.clear()
         viewModelScope.launch(disk) {
             if (deleteLocalCopy) snapshotStore.clear()
