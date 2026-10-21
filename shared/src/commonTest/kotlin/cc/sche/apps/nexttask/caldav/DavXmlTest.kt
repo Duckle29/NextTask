@@ -2,6 +2,7 @@ package cc.sche.apps.nexttask.caldav
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class DavXmlTest {
 
@@ -27,5 +28,27 @@ class DavXmlEntityTest {
         val data = DavXml.parseMultistatus(xml).responses.single().prop(Dav.CALDAV, "calendar-data")?.text
 
         assertEquals("Tom & Jerry <3 > \"x\" 'y' é€", data)
+    }
+}
+
+class DavXmlHostileInputTest {
+
+    @Test
+    fun deeplyNestedXmlIsParsedWithoutRecursion() {
+        val depth = 200_000
+        val xml = """<d:multistatus xmlns:d="DAV:"><d:response><d:href>/a.ics</d:href><d:propstat><d:prop>""" +
+            "<x>".repeat(depth) + "</x>".repeat(depth) +
+            "</d:prop></d:propstat></d:response></d:multistatus>"
+
+        assertEquals("/a.ics", DavXml.parseMultistatus(xml).responses.single().href)
+    }
+
+    @Test
+    fun documentTypeDeclarationsAreRefused() {
+        val entities = (1..9).joinToString("") { level -> """<!ENTITY e$level "${"&e${level - 1};".repeat(10)}">""" }
+        val xml = """<?xml version="1.0"?><!DOCTYPE d:multistatus [<!ENTITY e0 "lol">$entities]>""" +
+            """<d:multistatus xmlns:d="DAV:"><d:response><d:href>&e9;</d:href></d:response></d:multistatus>"""
+
+        assertFailsWith<IllegalArgumentException> { DavXml.parseMultistatus(xml) }
     }
 }
