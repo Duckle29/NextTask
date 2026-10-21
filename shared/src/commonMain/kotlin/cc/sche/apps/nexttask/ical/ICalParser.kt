@@ -26,10 +26,13 @@ object ICalParser {
             ?: throw ICalParseException("Expected exactly one top-level component")
     }
 
-    /** Joins folded lines (continuations start with a space or tab) and drops blank lines. */
+    /**
+     * Joins folded lines (continuations start with a space or tab) and drops blank lines. CRLF, LF and a
+     * lone CR all end a line, so no value ever holds a line break that would be written back unescaped.
+     */
     internal fun unfold(text: String): List<String> {
         val lines = mutableListOf<StringBuilder>()
-        for (raw in text.split("\r\n", "\n")) {
+        for (raw in text.lines()) {
             if (raw.isEmpty()) continue
             if ((raw[0] == ' ' || raw[0] == '\t') && lines.isNotEmpty()) {
                 lines.last().append(raw, 1, raw.length)

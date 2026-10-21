@@ -43,6 +43,7 @@ class ReleaseSmokeTest {
         find(By.text("http://")).click()
         find(By.clazz("android.widget.EditText")).text = SERVER_ADDRESS
         find(By.text("Sign in with browser")).click()
+        find(By.text("Sign in anyway")).click() // the warning about plain HTTP
         awaitBrowser()
         // The fake server's login page approves the login as soon as anyone opens it, like a click on "Grant access".
         server("login/v2/flow/abc")

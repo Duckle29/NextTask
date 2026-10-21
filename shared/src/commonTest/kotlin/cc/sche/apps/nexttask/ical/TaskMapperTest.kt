@@ -90,6 +90,17 @@ class TaskMapperTest {
     }
 
     @Test
+    fun aLoneCarriageReturnEndsTheLineAndIsNeverWrittenBack() {
+        val withCr = sample.replace("X-APPLE-SORT-ORDER:3", "X-NOTE:first\rX-APPLE-SORT-ORDER:3")
+        val task = TaskMapper.fromIcs(withCr)
+        assertEquals(3, task.sortOrder)
+
+        val out = TaskMapper.toIcs(task)
+        assertTrue(out.replace("\r\n", "").none { it == '\r' || it == '\n' }, "stray line break in: $out")
+        assertTrue("\r\nX-NOTE:first\r\n" in out, out)
+    }
+
+    @Test
     fun foldsLongLinesAtSeventyFiveOctets() {
         val task = TaskMapper.fromIcs(sample).copy(summary = "ø".repeat(100))
         val out = TaskMapper.toIcs(task)

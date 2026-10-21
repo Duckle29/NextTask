@@ -19,33 +19,42 @@ data class XmlNode(
         children.filter { it.namespace == namespace && it.name == name }
 
     companion object {
+        /**
+         * Parses [xml] without recursion, so no nesting depth can exhaust the call stack. Documents with a
+         * DTD are refused: WebDAV never needs one, and its entity declarations could expand to gigabytes.
+         */
         fun parse(xml: String): XmlNode {
             val reader = KtXmlReader(xml)
+            // The elements opened but not yet closed, innermost last.
+            val open = ArrayDeque<Builder>()
             try {
                 while (reader.hasNext()) {
-                    if (reader.next() == EventType.START_ELEMENT) return readElement(reader)
+                    when (reader.next()) {
+                        EventType.DOCDECL -> throw IllegalArgumentException("Document type declarations are not accepted")
+                        EventType.START_ELEMENT -> open.addLast(Builder(reader))
+                        EventType.TEXT, EventType.CDSECT, EventType.ENTITY_REF -> open.lastOrNull()?.text?.append(reader.text)
+                        EventType.END_ELEMENT -> {
+                            val element = open.removeLast().build()
+                            val parent = open.lastOrNull() ?: return element
+                            parent.children += element
+                        }
+                        else -> Unit
+                    }
                 }
             } finally {
                 reader.close()
             }
-            throw IllegalArgumentException("No root element")
+            throw IllegalArgumentException(open.lastOrNull()?.let { "Unterminated element <${it.name}>" } ?: "No root element")
         }
+    }
 
-        private fun readElement(reader: XmlReader): XmlNode {
-            val namespace = reader.namespaceURI
-            val name = reader.localName
-            val attributes = (0 until reader.attributeCount).associate { reader.getAttributeLocalName(it) to reader.getAttributeValue(it) }
-            val text = StringBuilder()
-            val children = mutableListOf<XmlNode>()
-            while (reader.hasNext()) {
-                when (reader.next()) {
-                    EventType.START_ELEMENT -> children += readElement(reader)
-                    EventType.TEXT, EventType.CDSECT, EventType.ENTITY_REF -> text.append(reader.text)
-                    EventType.END_ELEMENT -> return XmlNode(namespace, name, text.toString().trim(), children, attributes)
-                    else -> Unit
-                }
-            }
-            throw IllegalArgumentException("Unterminated element <$name>")
-        }
+    private class Builder(reader: XmlReader) {
+        val namespace: String = reader.namespaceURI
+        val name: String = reader.localName
+        val attributes = (0 until reader.attributeCount).associate { reader.getAttributeLocalName(it) to reader.getAttributeValue(it) }
+        val text = StringBuilder()
+        val children = mutableListOf<XmlNode>()
+
+        fun build() = XmlNode(namespace, name, text.toString().trim(), children, attributes)
     }
 }
