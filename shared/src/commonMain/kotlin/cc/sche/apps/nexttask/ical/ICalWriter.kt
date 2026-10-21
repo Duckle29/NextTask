@@ -26,6 +26,8 @@ object ICalWriter {
     }
 
     private fun StringBuilder.appendFolded(line: String) {
+        // A line break inside a value would end the content line early and let the rest pass as other properties.
+        require('\r' !in line && '\n' !in line) { "Line break in content line ${line.substringBefore(':')}" }
         var octets = 0
         for (ch in line.codePointsCompat()) {
             val width = utf8Width(ch)
