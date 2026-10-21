@@ -2,7 +2,8 @@ package cc.sche.apps.nexttask.xml
 
 import nl.adaptivity.xmlutil.EventType
 import nl.adaptivity.xmlutil.XmlReader
-import nl.adaptivity.xmlutil.core.KtXmlReader
+import nl.adaptivity.xmlutil.newGenericReader
+import nl.adaptivity.xmlutil.xmlStreaming
 
 /** Minimal namespace-aware XML element tree, enough for WebDAV multistatus bodies. */
 data class XmlNode(
@@ -24,7 +25,8 @@ data class XmlNode(
          * DTD are refused: WebDAV never needs one, and its entity declarations could expand to gigabytes.
          */
         fun parse(xml: String): XmlNode {
-            val reader = KtXmlReader(xml)
+            // The generic reader is the same parser on every platform, so DTDs are reported (and refused) everywhere.
+            val reader = xmlStreaming.newGenericReader(xml)
             // The elements opened but not yet closed, innermost last.
             val open = ArrayDeque<Builder>()
             try {
