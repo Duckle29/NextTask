@@ -277,7 +277,23 @@ private fun LoginScreen(onSignIn: (String) -> Unit) {
         }
     }
 
-    val signIn = { if (address.isNotEmpty()) onSignIn(scheme.prefix + address) }
+    var confirmingHttp by rememberSaveable { mutableStateOf(false) }
+
+    // Plain HTTP is only signed in to after the user has read why it is risky.
+    val signIn = {
+        when {
+            address.isEmpty() -> Unit
+            scheme == Scheme.Http -> confirmingHttp = true
+            else -> onSignIn(scheme.prefix + address)
+        }
+    }
+
+    if (confirmingHttp) {
+        PlainHttpWarning(
+            onConfirm = { confirmingHttp = false; onSignIn(scheme.prefix + address) },
+            onDismiss = { confirmingHttp = false },
+        )
+    }
 
     Centered {
         Text("Sign in to Nextcloud", style = MaterialTheme.typography.headlineSmall)
@@ -315,6 +331,29 @@ private fun LoginScreen(onSignIn: (String) -> Unit) {
         }
         Button(onClick = { signIn() }, enabled = address.isNotEmpty()) { Text("Sign in with browser") }
     }
+}
+
+@Composable
+private fun PlainHttpWarning(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sign in without encryption?") },
+        text = {
+            Text(
+                "With http:// everything between this device and your server travels in plain text. " +
+                    "Anyone on the same Wi-Fi, and anyone on the way to a server on the internet (the network's " +
+                    "operator, your internet provider, a compromised router), can:\n\n" +
+                    "• read your tasks\n" +
+                    "• change them while they sync\n" +
+                    "• copy the app password, which opens your whole Nextcloud account: " +
+                    "files, contacts and calendars, not just tasks\n\n" +
+                    "Only continue if you trust every network in between. HTTPS on the server, for example with a free " +
+                    "Let's Encrypt certificate, avoids all of this.",
+            )
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Sign in anyway") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
