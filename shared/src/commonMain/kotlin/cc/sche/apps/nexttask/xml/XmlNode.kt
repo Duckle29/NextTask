@@ -2,7 +2,6 @@ package cc.sche.apps.nexttask.xml
 
 import nl.adaptivity.xmlutil.EventType
 import nl.adaptivity.xmlutil.XmlReader
-import nl.adaptivity.xmlutil.newGenericReader
 import nl.adaptivity.xmlutil.xmlStreaming
 
 /** Minimal namespace-aware XML element tree, enough for WebDAV multistatus bodies. */
