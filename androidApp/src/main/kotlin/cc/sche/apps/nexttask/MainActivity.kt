@@ -164,6 +164,7 @@ private fun App(viewModel: AppViewModel) {
     val state by viewModel.state.collectAsState()
     val message by viewModel.message.collectAsState()
     val syncStatus by viewModel.syncStatus.collectAsState()
+    val saveRetryIn by viewModel.saveRetryIn.collectAsState()
     val refreshing by viewModel.refreshing.collectAsState()
     val history by viewModel.historyState.collectAsState()
     val completedOrder by viewModel.completedOrder.collectAsState()
@@ -172,6 +173,7 @@ private fun App(viewModel: AppViewModel) {
     BackHandler(enabled = showPreferences) { showPreferences = false }
 
     val banner: @Composable () -> Unit = {
+        saveRetryIn?.let { SaveFailedBanner(it) }
         message?.let {
             MessageBanner(it, onUndo = { viewModel.undo(); viewModel.dismissMessage() }, onDismiss = viewModel::dismissMessage)
         }
@@ -244,6 +246,15 @@ private fun MessageBanner(message: UiMessage, onUndo: () -> Unit, onDismiss: () 
         if (message.undoable) TextButton(onClick = onUndo) { Text("Undo") }
         TextButton(onClick = onDismiss) { Text("Dismiss") }
     }
+}
+
+@Composable
+private fun SaveFailedBanner(retryInSeconds: Int) {
+    Text(
+        "Saving failed. Retrying in ${retryInSeconds}s",
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+    )
 }
 
 @Composable

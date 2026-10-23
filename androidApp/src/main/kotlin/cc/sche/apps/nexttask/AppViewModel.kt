@@ -41,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -50,6 +51,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.UnknownHostException
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 import kotlin.uuid.Uuid
 
 data class HistoryState(val canUndo: Boolean = false, val canRedo: Boolean = false)
@@ -146,6 +150,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _message = MutableStateFlow<UiMessage?>(null)
     val message: StateFlow<UiMessage?> = _message.asStateFlow()
+
+    private val _saveRetryIn = MutableStateFlow<Int?>(null)
+    /** Seconds until saving the local copy is tried again, after it failed; null while saving works. */
+    val saveRetryIn: StateFlow<Int?> = _saveRetryIn.asStateFlow()
 
     private var loginJob: Job? = null
     private var syncJob: Job? = null
@@ -457,15 +465,36 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _syncStatus.value = SyncStatus()
 
             launch { repository.snapshot.collect(::publish) }
-            launch {
-                repository.snapshot.collectLatest { snapshot ->
-                    withContext(disk) {
-                        snapshotStore.save(snapshot)
-                        reminders.update(snapshot)
-                    }
+            launch { keepSaved(repository) }
+            requestSync(force = true)
+        }
+    }
+
+    /**
+     * Writes every new version of the local copy to disk and updates the reminders from it. A failed save (e.g.
+     * the storage is full) is retried, waiting longer each time; a newer version replaces the one being retried.
+     */
+    private suspend fun keepSaved(repository: TaskRepository) {
+        var failures = 0
+        repository.snapshot.collectLatest { snapshot ->
+            withContext(disk) { reminders.update(snapshot) }
+            while (true) {
+                try {
+                    withContext(disk) { snapshotStore.save(snapshot) }
+                    failures = 0
+                    _saveRetryIn.value = null
+                    return@collectLatest
+                } catch (_: IOException) {
+                    countDownToSaveRetry(saveRetryDelay(failures++))
                 }
             }
-            requestSync(force = true)
+        }
+    }
+
+    private suspend fun countDownToSaveRetry(wait: Duration) {
+        for (seconds in wait.inWholeSeconds downTo 1) {
+            _saveRetryIn.value = seconds.toInt()
+            delay(1.seconds)
         }
     }
 
@@ -575,6 +604,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         histories.clear()
         updateHistoryState()
         _syncStatus.value = SyncStatus()
+        _saveRetryIn.value = null
         _state.value = AppState.LoggedOut
     }
 
@@ -612,5 +642,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val NEVER = Long.MIN_VALUE / 2
         const val RECENT_SYNC_MS = 30_000L
+        val SAVE_RETRY_FIRST = 2.seconds
+        val SAVE_RETRY_MAX = 1.minutes
+
+        /** Doubles after each failed save, from [SAVE_RETRY_FIRST] up to [SAVE_RETRY_MAX]. */
+        fun saveRetryDelay(failures: Int): Duration =
+            (SAVE_RETRY_FIRST * (1 shl failures.coerceAtMost(10))).coerceAtMost(SAVE_RETRY_MAX)
     }
 }
