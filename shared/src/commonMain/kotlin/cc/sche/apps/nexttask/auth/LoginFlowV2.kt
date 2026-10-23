@@ -5,8 +5,8 @@ import io.ktor.client.request.forms.submitForm
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.statement.HttpResponse
-import io.ktor.client.statement.request
 import io.ktor.client.statement.bodyAsText
+import io.ktor.client.statement.request
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.URLBuilder
@@ -18,6 +18,7 @@ import io.ktor.http.takeFrom
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
@@ -144,13 +145,13 @@ class LoginFlowV2(
         }
     }
 
-    private suspend fun HttpResponse.requireSuccess(action: String) {
+    private fun HttpResponse.requireSuccess(action: String) {
         if (!status.isSuccess()) throw LoginFailedException("$action failed: HTTP ${status.value}")
     }
 
     private suspend inline fun <reified T> decode(response: HttpResponse): T = try {
         json.decodeFromString<T>(response.bodyAsText())
-    } catch (e: kotlinx.serialization.SerializationException) {
+    } catch (e: SerializationException) {
         throw LoginFailedException("Unexpected response from server", e)
     }
 
